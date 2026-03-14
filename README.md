@@ -10,6 +10,8 @@ Current MVP support:
 
 - Codex
 - Claude
+- OpenCode
+- Copilot
 - Local source repositories
 - JSON reporting
 
@@ -21,6 +23,8 @@ Current MVP support:
 - Agent CLIs installed locally if you want to run them:
   - `codex`
   - `claude`
+  - `opencode`
+  - `copilot`
 
 ## Install and Run
 
@@ -54,6 +58,8 @@ test_command: pytest
 agents:
   - codex
   - claude
+  - opencode
+  - copilot
 ```
 
 Fields:
@@ -80,6 +86,14 @@ runs/
       fix.patch
       ...
     claude/
+      PATCHARENA_TASK.md
+      fix.patch
+      ...
+    opencode/
+      PATCHARENA_TASK.md
+      fix.patch
+      ...
+    copilot/
       PATCHARENA_TASK.md
       fix.patch
       ...
@@ -141,6 +155,5 @@ uv run python -m unittest discover -s tests
 ## MVP Limitations
 
 - Only local repositories are supported
-- Only Codex and Claude are wired into the runtime registry
 - Reporting is JSON-only
 - Real agent execution depends on local CLI auth and setup

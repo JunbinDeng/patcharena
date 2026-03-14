@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from patcharena.agents import get_agent_registry
 from patcharena.agents.base import BaseAgent
 from patcharena.cli import main
 from patcharena.models import CommandResult, TaskConfig
@@ -64,6 +65,44 @@ class TaskConfigTests(unittest.TestCase):
             self.assertEqual(config.compile_command, "")
             self.assertEqual(config.test_command, "")
             self.assertEqual(config.agents, ["codex", "claude"])
+
+    def test_from_file_accepts_all_supported_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task_file = root / "task.yaml"
+            task_file.write_text(
+                "\n".join(
+                    [
+                        "name: sample-task",
+                        "repo_path: ./repo",
+                        "prompt: Fix the bug",
+                        "agents:",
+                        "  - codex",
+                        "  - claude",
+                        "  - opencode",
+                        "  - copilot",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = TaskConfig.from_file(task_file)
+
+            self.assertEqual(
+                config.agents,
+                ["codex", "claude", "opencode", "copilot"],
+            )
+
+
+class AgentRegistryTests(unittest.TestCase):
+    def test_registry_includes_all_supported_agents(self) -> None:
+        registry = get_agent_registry()
+
+        self.assertEqual(
+            sorted(registry),
+            ["claude", "codex", "copilot", "opencode"],
+        )
 
 
 class ResultParserTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-"""Placeholder OpenCode adapter."""
+"""OpenCode agent adapter."""
 
 from __future__ import annotations
 
@@ -12,4 +12,4 @@ class OpenCodeAgent(BaseAgent):
     binary_name = "opencode"
 
     def build_command(self, prompt: str, workspace: Path) -> list[str]:
-        return ["opencode", prompt]
+        return ["opencode", "run", "--dir", str(workspace), prompt]

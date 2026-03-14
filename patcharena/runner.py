@@ -28,7 +28,10 @@ def run_task_file(
     missing_agents = [name for name in task.agents if name not in registry]
     if missing_agents:
         names = ", ".join(missing_agents)
-        raise ValueError(f"unknown agents requested: {names}")
+        supported = ", ".join(sorted(registry))
+        raise ValueError(
+            f"unknown agents requested: {names}. Supported agents: {supported}"
+        )
 
     workspace_manager = WorkspaceManager(runs_root)
     run_dir = workspace_manager.run_dir(task.name)
