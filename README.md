@@ -122,8 +122,14 @@ Each agent result includes:
 - `tests_passed`
 - `status`
 - `agent_exit_code`
+- `agent_command`
+- `agent_stderr`
 - `compile_exit_code`
+- `compile_command`
+- `compile_stderr`
 - `test_exit_code`
+- `test_command`
+- `test_stderr`
 - `workspace`
 - `patch_file`
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -38,6 +39,14 @@ class FakeAgent(BaseAgent):
             stderr="",
             duration_seconds=0.01,
         )
+
+
+class RelativePathAgent(BaseAgent):
+    name = "relative"
+    binary_name = "path-check"
+
+    def build_command(self, prompt: str, workspace: Path) -> list[str]:
+        return ["path-check", str(workspace)]
 
 
 class TaskConfigTests(unittest.TestCase):
@@ -103,6 +112,44 @@ class AgentRegistryTests(unittest.TestCase):
             sorted(registry),
             ["claude", "codex", "copilot", "opencode"],
         )
+
+
+class BaseAgentTests(unittest.TestCase):
+    def test_run_resolves_relative_workspace_before_building_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "runs" / "task" / "agent"
+            workspace.mkdir(parents=True)
+
+            script = root / "path-check"
+            script.write_text(
+                "\n".join(
+                    [
+                        "#!/bin/sh",
+                        'if [ -d "$1" ]; then',
+                        "  exit 0",
+                        "fi",
+                        "exit 1",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.dict(
+                    os.environ,
+                    {"PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}"},
+                ):
+                    result = RelativePathAgent().run("ignored", Path("runs/task/agent"))
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertTrue(result.passed)
 
 
 class ResultParserTests(unittest.TestCase):
@@ -203,6 +250,10 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(report.results[0].test_result.passed)
             self.assertTrue(report.results[0].patch_file.exists())
             self.assertEqual(payload["results"][0]["agent"], "fake")
+            self.assertEqual(payload["results"][0]["agent_command"], "fake")
+            self.assertEqual(payload["results"][0]["agent_stderr"], "")
+            self.assertEqual(payload["results"][0]["compile_stderr"], "")
+            self.assertEqual(payload["results"][0]["test_stderr"], "")
             self.assertEqual(payload["summary"]["successful_agents"], 1)
 
 

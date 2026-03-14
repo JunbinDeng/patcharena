@@ -25,6 +25,7 @@ class BaseAgent:
         raise NotImplementedError
 
     def run(self, task_prompt: str, workspace: Path) -> CommandResult:
+        workspace = workspace.resolve()
         command = self.build_command(task_prompt, workspace)
         if not self.is_available():
             return CommandResult(
