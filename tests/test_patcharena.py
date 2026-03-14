@@ -302,6 +302,10 @@ def create_git_repo(path: Path) -> Path:
         [
             "git",
             "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
             "user.name=PatchArena",
             "-c",
             "user.email=patcharena@example.com",

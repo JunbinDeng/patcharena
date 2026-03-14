@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from string import Template
 
+from patcharena.git_env import git_environment
 from patcharena.models import TaskConfig
 
 
@@ -53,6 +54,7 @@ class WorkspaceManager:
             text=True,
             capture_output=True,
             check=False,
+            env=git_environment(),
         )
         if clone_result.returncode != 0:
             raise RuntimeError(clone_result.stderr.strip() or "git clone failed")
@@ -85,6 +87,7 @@ class WorkspaceManager:
             text=True,
             capture_output=True,
             check=False,
+            env=git_environment(),
         )
         if check_result.returncode != 0:
             raise ValueError(f"repository path is not a git repository: {resolved}")
