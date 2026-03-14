@@ -92,7 +92,7 @@ class WorkspaceManager:
         return resolved
 
     def render_task_markdown(self, task: TaskConfig) -> str:
-        template = Template(self.read_template("PATCHARENA_TASK.md.j2"))
+        template = Template(self.read_template("PATCHARENA_TASK.md.template"))
         return template.safe_substitute(
             name=task.name,
             repo_path=str(task.repo_path),
