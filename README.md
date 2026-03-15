@@ -36,17 +36,26 @@ Show the CLI:
 uv run patcharena --help
 ```
 
-Run a benchmark:
+Create a local task file from the sample:
+
+```bash
+cp task.example.yaml task.yaml
+```
+
+Edit `task.yaml` for your local repository and commands, then run a benchmark:
 
 ```bash
 uv run patcharena run task.yaml
 ```
 
-The command prints the path to the generated report.
+`task.yaml` is intentionally untracked so you can keep machine-specific paths
+and private benchmark prompts locally. The command prints the path to the
+generated report.
 
 ## Task File
 
-PatchArena expects a `task.yaml` file with this shape:
+PatchArena ships a tracked sample at `task.example.yaml`. Copy it to a local
+`task.yaml` and update the values for your environment:
 
 ```yaml
 name: demo-task

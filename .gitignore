@@ -5,3 +5,6 @@ __pycache__/
 patcharena.egg-info/
 runs/
 .idea/
+.DS_Store
+/task.yaml
+/AGENTS.md

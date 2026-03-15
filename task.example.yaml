@@ -1,0 +1,11 @@
+name: demo-task
+repo_path: /absolute/path/to/local/git/repo
+prompt: |
+  Fix the failing behavior and keep the project runnable.
+compile_command: ""
+test_command: pytest
+agents:
+  - codex
+  - claude
+  - opencode
+  - copilot
