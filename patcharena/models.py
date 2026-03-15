@@ -122,6 +122,7 @@ class AgentRunResult:
             "status": self.status,
             "agent_exit_code": self.agent_result.exit_code,
             "agent_command": self.agent_result.command,
+            "agent_stdout": self.agent_result.stdout,
             "agent_stderr": self.agent_result.stderr,
             "compile_exit_code": self.compile_result.exit_code,
             "compile_command": self.compile_result.command,

@@ -35,7 +35,7 @@ class FakeAgent(BaseAgent):
             command="fake",
             exit_code=0,
             passed=True,
-            stdout="",
+            stdout="fake stdout",
             stderr="",
             duration_seconds=0.01,
         )
@@ -251,6 +251,7 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(report.results[0].patch_file.exists())
             self.assertEqual(payload["results"][0]["agent"], "fake")
             self.assertEqual(payload["results"][0]["agent_command"], "fake")
+            self.assertEqual(payload["results"][0]["agent_stdout"], "fake stdout")
             self.assertEqual(payload["results"][0]["agent_stderr"], "")
             self.assertEqual(payload["results"][0]["compile_stderr"], "")
             self.assertEqual(payload["results"][0]["test_stderr"], "")

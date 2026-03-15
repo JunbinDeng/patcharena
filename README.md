@@ -123,6 +123,7 @@ Each agent result includes:
 - `status`
 - `agent_exit_code`
 - `agent_command`
+- `agent_stdout`
 - `agent_stderr`
 - `compile_exit_code`
 - `compile_command`
@@ -139,6 +140,13 @@ Status values:
 - `validation_failed`
 - `agent_failed`
 - `error`
+
+PatchArena does not currently expose per-agent output settings in `task.yaml`
+or the CLI. Agent CLIs may still have their own output controls; for example,
+the locally installed `claude` CLI advertises `--output-format` and
+`--debug-file`. PatchArena simply captures whatever the agent process emits to
+stdout and stderr and stores those as `agent_stdout` and `agent_stderr` in the
+report.
 
 ## How It Works
 
