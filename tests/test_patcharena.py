@@ -233,6 +233,48 @@ class ResultParserTests(unittest.TestCase):
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_prepare_appends_patcharena_content_when_agents_md_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_repo = create_git_repo(root / "source")
+            (source_repo / "AGENTS.md").write_text("# Project rules\n- Keep it simple\n", encoding="utf-8")
+            run(["git", "add", "AGENTS.md"], source_repo)
+            run(
+                ["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+                 "-c", "user.name=Test", "-c", "user.email=test@test.com",
+                 "commit", "-m", "Add AGENTS.md"],
+                source_repo,
+            )
+            manager = WorkspaceManager(root / "runs")
+            task = TaskConfig(name="agents-test", repo_path=source_repo, prompt="Make a change")
+
+            prepared = manager.prepare(task, "codex")
+
+            agents_content = (prepared.path / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("Keep it simple", agents_content)
+            self.assertIn("PatchArena Workspace", agents_content)
+            self.assertIn("AGENTS.md", prepared.excluded_patch_paths)
+
+    def test_prepare_writes_patch_only_instruction_when_agents_md_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_repo = create_git_repo(root / "source")
+            (source_repo / "AGENTS.md").write_text("# Project rules\n", encoding="utf-8")
+            run(["git", "add", "AGENTS.md"], source_repo)
+            run(
+                ["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+                 "-c", "user.name=Test", "-c", "user.email=test@test.com",
+                 "commit", "-m", "Add AGENTS.md"],
+                source_repo,
+            )
+            manager = WorkspaceManager(root / "runs")
+            task = TaskConfig(name="patch-only-test", repo_path=source_repo, prompt="Make a change")
+
+            prepared = manager.prepare(task, "codex", patch_only=True)
+
+            agents_content = (prepared.path / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("Do not run shell commands", agents_content)
+
     def test_prepare_clones_repo_and_writes_task_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -251,6 +293,25 @@ class WorkspaceTests(unittest.TestCase):
 
 
 class PatchTests(unittest.TestCase):
+    def test_extract_patch_handles_non_utf8_file_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_repo = create_git_repo(root / "source")
+            manager = WorkspaceManager(root / "runs")
+            task = TaskConfig(name="binary-test", repo_path=source_repo, prompt="Add latin-1 file")
+            prepared = manager.prepare(task, "codex")
+
+            # Write a file with latin-1 bytes that are invalid UTF-8 (no null, so git treats as text)
+            (prepared.path / "latin1.txt").write_bytes(b"caf\xe9\n")
+
+            stats = extract_patch(
+                prepared.path,
+                prepared.patch_file,
+                excluded_paths=prepared.excluded_patch_paths,
+            )
+
+            self.assertGreater(stats.files_changed, 0)
+
     def test_extract_patch_writes_fix_patch_and_counts_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

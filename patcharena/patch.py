@@ -43,6 +43,8 @@ def _run_git(command: list[str], workspace: Path) -> str:
         command,
         cwd=workspace,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
         env=git_environment(),

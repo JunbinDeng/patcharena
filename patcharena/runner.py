@@ -135,6 +135,8 @@ def run_validation(command: str, workspace: Path) -> CommandResult:
             cwd=workspace,
             shell=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
         )

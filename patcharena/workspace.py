@@ -66,12 +66,15 @@ class WorkspaceManager:
         )
 
         agents_file = workspace / "AGENTS.md"
-        if not agents_file.exists():
-            agents_content = self.read_template("AGENTS.md")
-            if patch_only:
-                agents_content += "- Do not run shell commands or execute code. Only read and write files.\n"
-            agents_file.write_text(agents_content, encoding="utf-8")
-            excluded_paths.append("AGENTS.md")
+        patcharena_content = self.read_template("AGENTS.md")
+        if patch_only:
+            patcharena_content += "- Do not run shell commands or execute code. Only read and write files.\n"
+        if agents_file.exists():
+            existing = agents_file.read_text(encoding="utf-8")
+            agents_file.write_text(existing.rstrip("\n") + "\n\n" + patcharena_content, encoding="utf-8")
+        else:
+            agents_file.write_text(patcharena_content, encoding="utf-8")
+        excluded_paths.append("AGENTS.md")
 
         return PreparedWorkspace(
             path=workspace,

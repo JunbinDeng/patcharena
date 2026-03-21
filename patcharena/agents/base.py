@@ -50,6 +50,8 @@ class BaseAgent:
                 cwd=workspace,
                 input=task_prompt if self.prompt_via_stdin else None,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 capture_output=True,
                 check=False,
                 timeout=timeout,
