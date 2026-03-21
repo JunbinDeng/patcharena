@@ -178,6 +178,59 @@ class BaseAgentTests(unittest.TestCase):
 
 
 class AgentTimeoutTests(unittest.TestCase):
+    def test_timeout_reason_propagated_to_compile_and_test_stderr(self) -> None:
+        """Agent returning exit_code=None should thread its stderr into compile/test stderr."""
+
+        class TimedOutAgent(BaseAgent):
+            name = "timedout"
+            binary_name = "timedout"
+
+            def is_available(self) -> bool:
+                return True
+
+            def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
+                return ["timedout"]
+
+            def run(self, task_prompt: str, workspace: Path, patch_only: bool = False, timeout: int | None = None) -> CommandResult:
+                del task_prompt, patch_only, timeout
+                return CommandResult(
+                    command="timedout",
+                    exit_code=None,
+                    passed=False,
+                    stdout="",
+                    stderr="Agent timed out after 1 seconds",
+                    duration_seconds=1.0,
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_repo = create_git_repo(root / "source")
+            task_file = root / "task.yaml"
+            task_file.write_text(
+                "\n".join(
+                    [
+                        "name: timeout-propagation-task",
+                        f"repo_path: {source_repo}",
+                        "prompt: Test",
+                        "agents:",
+                        "  - timedout",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            report = run_task_file(
+                task_file,
+                runs_root=root / "runs",
+                agent_registry={"timedout": TimedOutAgent()},
+            )
+
+            result = report.results[0]
+            self.assertEqual(result.status, "error")
+            self.assertIn("timed out", result.compile_result.stderr.lower())
+            self.assertIn("timed out", result.test_result.stderr.lower())
+
     def test_run_returns_error_result_on_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)

@@ -80,8 +80,8 @@ def _run_agent_benchmark(
         agent_result = agent.run(task.prompt, workspace.path, task.patch_only, timeout=task.agent_timeout)
 
         if agent_result.exit_code is None:
-            compile_result = skipped_result("validation skipped because the agent did not start")
-            test_result = skipped_result("validation skipped because the agent did not start")
+            compile_result = skipped_result(f"validation skipped: {agent_result.stderr}")
+            test_result = skipped_result(f"validation skipped: {agent_result.stderr}")
             patch_stats = extract_patch(
                 workspace.path,
                 workspace.patch_file,
