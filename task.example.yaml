@@ -5,6 +5,7 @@ prompt: |
 compile_command: ""
 test_command: pytest
 patch_only: false
+agent_timeout: 300
 agents:
   - codex
   - claude

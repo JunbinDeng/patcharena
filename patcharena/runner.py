@@ -25,6 +25,11 @@ def run_task_file(
     runs_root = Path("runs") if runs_root is None else Path(runs_root)
     registry = agent_registry or get_agent_registry()
 
+    seen: set[str] = set()
+    duplicates = [name for name in task.agents if name in seen or seen.add(name)]  # type: ignore[func-returns-value]
+    if duplicates:
+        raise ValueError(f"duplicate agents in task: {', '.join(sorted(set(duplicates)))}")
+
     missing_agents = [name for name in task.agents if name not in registry]
     if missing_agents:
         names = ", ".join(missing_agents)
@@ -67,7 +72,7 @@ def _run_agent_benchmark(
     workspace = None
     try:
         workspace = workspace_manager.prepare(task, agent.name, task.patch_only)
-        agent_result = agent.run(task.prompt, workspace.path, task.patch_only)
+        agent_result = agent.run(task.prompt, workspace.path, task.patch_only, timeout=task.agent_timeout)
 
         if agent_result.exit_code is None:
             compile_result = skipped_result("validation skipped because the agent did not start")

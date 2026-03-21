@@ -24,7 +24,13 @@ class BaseAgent:
     def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
         raise NotImplementedError
 
-    def run(self, task_prompt: str, workspace: Path, patch_only: bool = False) -> CommandResult:
+    def run(
+        self,
+        task_prompt: str,
+        workspace: Path,
+        patch_only: bool = False,
+        timeout: int | None = None,
+    ) -> CommandResult:
         workspace = workspace.resolve()
         command = self.build_command(task_prompt, workspace, patch_only)
         if not self.is_available():
@@ -46,6 +52,16 @@ class BaseAgent:
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return CommandResult(
+                command=" ".join(command),
+                exit_code=None,
+                passed=False,
+                stdout="",
+                stderr=f"Agent timed out after {timeout} seconds",
+                duration_seconds=time.time() - started_at,
             )
         except OSError as exc:
             return CommandResult(

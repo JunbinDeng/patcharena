@@ -28,7 +28,7 @@ class FakeAgent(BaseAgent):
     def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
         return ["fake"]
 
-    def run(self, task_prompt: str, workspace: Path, patch_only: bool = False) -> CommandResult:
+    def run(self, task_prompt: str, workspace: Path, patch_only: bool = False, timeout: int | None = None) -> CommandResult:
         target = workspace / "hello.txt"
         target.write_text("done\n", encoding="utf-8")
         return CommandResult(
@@ -41,6 +41,19 @@ class FakeAgent(BaseAgent):
         )
 
 
+class AlwaysAvailableAgent(BaseAgent):
+    """Agent that always reports as available and delegates to BaseAgent.run."""
+
+    name = "always"
+    binary_name = "always"
+
+    def is_available(self) -> bool:
+        return True
+
+    def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
+        return ["always", prompt]
+
+
 class RelativePathAgent(BaseAgent):
     name = "relative"
     binary_name = "path-check"
@@ -50,6 +63,18 @@ class RelativePathAgent(BaseAgent):
 
 
 class TaskConfigTests(unittest.TestCase):
+    def test_from_file_rejects_name_with_path_separator(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for bad_name in ["../escape", "task/subtask", ".."]:
+                task_file = root / "task.yaml"
+                task_file.write_text(
+                    f"name: {bad_name!r}\nrepo_path: ./repo\nprompt: test\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(ValueError, msg=f"name {bad_name!r} should be rejected"):
+                    TaskConfig.from_file(task_file)
+
     def test_from_file_applies_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -152,6 +177,43 @@ class BaseAgentTests(unittest.TestCase):
             self.assertTrue(result.passed)
 
 
+class AgentTimeoutTests(unittest.TestCase):
+    def test_run_returns_error_result_on_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+
+            with mock.patch(
+                "patcharena.agents.base.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("fake", 1),
+            ):
+                result = AlwaysAvailableAgent().run("ignored", workspace, timeout=1)
+
+            self.assertIsNone(result.exit_code)
+            self.assertFalse(result.passed)
+            self.assertIn("timed out", result.stderr.lower())
+
+    def test_task_config_loads_agent_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task_file = root / "task.yaml"
+            task_file.write_text(
+                "\n".join(
+                    [
+                        "name: timeout-task",
+                        "repo_path: ./repo",
+                        "prompt: Test",
+                        "agent_timeout: 120",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = TaskConfig.from_file(task_file)
+
+            self.assertEqual(config.agent_timeout, 120)
+
+
 class ResultParserTests(unittest.TestCase):
     def test_parse_shortstat_handles_edge_cases(self) -> None:
         cases = [
@@ -215,6 +277,33 @@ class PatchTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_run_task_file_rejects_duplicate_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_repo = create_git_repo(root / "source")
+            task_file = root / "task.yaml"
+            task_file.write_text(
+                "\n".join(
+                    [
+                        "name: dup-task",
+                        f"repo_path: {source_repo}",
+                        "prompt: Test",
+                        "agents:",
+                        "  - fake",
+                        "  - fake",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError, msg="duplicate agent names should raise ValueError"):
+                run_task_file(
+                    task_file,
+                    runs_root=root / "runs",
+                    agent_registry={"fake": FakeAgent()},
+                )
+
     def test_run_task_file_writes_json_report_with_fake_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

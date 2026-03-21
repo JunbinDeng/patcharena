@@ -19,6 +19,7 @@ class TaskConfig:
     test_command: str = ""
     agents: list[str] = field(default_factory=lambda: ["codex", "claude"])
     patch_only: bool = False
+    agent_timeout: int = 300
 
     @classmethod
     def from_file(cls, task_file: Path) -> "TaskConfig":
@@ -26,12 +27,18 @@ class TaskConfig:
         data = yaml.safe_load(task_path.read_text(encoding="utf-8")) or {}
 
         name = _require_string(data, "name")
+        name_parts = Path(name).parts
+        if len(name_parts) != 1 or name_parts[0] in (".", ".."):
+            raise ValueError(
+                f"task 'name' must be a single path component without separators: {name!r}"
+            )
         repo_value = _require_string(data, "repo_path")
         prompt = _require_string(data, "prompt")
         compile_command = _optional_string(data.get("compile_command"))
         test_command = _optional_string(data.get("test_command"))
         agents = _agent_list(data.get("agents"))
         patch_only = bool(data.get("patch_only", False))
+        agent_timeout = _positive_int(data.get("agent_timeout"), default=300)
 
         repo_path = Path(repo_value)
         if not repo_path.is_absolute():
@@ -45,6 +52,7 @@ class TaskConfig:
             test_command=test_command,
             agents=agents,
             patch_only=patch_only,
+            agent_timeout=agent_timeout,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -172,6 +180,14 @@ def _optional_string(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("optional task commands must be strings")
     return value.strip()
+
+
+def _positive_int(value: object, default: int) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, int) or value <= 0:
+        raise ValueError("'agent_timeout' must be a positive integer (seconds)")
+    return value
 
 
 def _agent_list(value: object) -> list[str]:
