@@ -26,9 +26,14 @@ def run_task_file(
     registry = agent_registry or get_agent_registry()
 
     seen: set[str] = set()
-    duplicates = [name for name in task.agents if name in seen or seen.add(name)]  # type: ignore[func-returns-value]
+    duplicates: list[str] = []
+    for name in task.agents:
+        if name in seen:
+            duplicates.append(name)
+        else:
+            seen.add(name)
     if duplicates:
-        raise ValueError(f"duplicate agents in task: {', '.join(sorted(set(duplicates)))}")
+        raise ValueError(f"duplicate agents in task: {', '.join(sorted(duplicates))}")
 
     missing_agents = [name for name in task.agents if name not in registry]
     if missing_agents:

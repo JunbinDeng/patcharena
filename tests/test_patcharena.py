@@ -238,13 +238,7 @@ class WorkspaceTests(unittest.TestCase):
             root = Path(temp_dir)
             source_repo = create_git_repo(root / "source")
             (source_repo / "AGENTS.md").write_text("# Project rules\n- Keep it simple\n", encoding="utf-8")
-            run(["git", "add", "AGENTS.md"], source_repo)
-            run(
-                ["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
-                 "-c", "user.name=Test", "-c", "user.email=test@test.com",
-                 "commit", "-m", "Add AGENTS.md"],
-                source_repo,
-            )
+            commit_file(source_repo, "AGENTS.md")
             manager = WorkspaceManager(root / "runs")
             task = TaskConfig(name="agents-test", repo_path=source_repo, prompt="Make a change")
 
@@ -260,13 +254,7 @@ class WorkspaceTests(unittest.TestCase):
             root = Path(temp_dir)
             source_repo = create_git_repo(root / "source")
             (source_repo / "AGENTS.md").write_text("# Project rules\n", encoding="utf-8")
-            run(["git", "add", "AGENTS.md"], source_repo)
-            run(
-                ["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
-                 "-c", "user.name=Test", "-c", "user.email=test@test.com",
-                 "commit", "-m", "Add AGENTS.md"],
-                source_repo,
-            )
+            commit_file(source_repo, "AGENTS.md")
             manager = WorkspaceManager(root / "runs")
             task = TaskConfig(name="patch-only-test", repo_path=source_repo, prompt="Make a change")
 
@@ -467,6 +455,16 @@ def create_git_repo(path: Path) -> Path:
         path,
     )
     return path
+
+
+def commit_file(repo: Path, filename: str, message: str = "Add file") -> None:
+    run(["git", "add", filename], repo)
+    run(
+        ["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+         "-c", "user.name=Test", "-c", "user.email=test@test.com",
+         "commit", "-m", message],
+        repo,
+    )
 
 
 def run(command: list[str], cwd: Path) -> None:

@@ -38,7 +38,7 @@ class TaskConfig:
         test_command = _optional_string(data.get("test_command"))
         agents = _agent_list(data.get("agents"))
         patch_only = bool(data.get("patch_only", False))
-        agent_timeout = _positive_int(data.get("agent_timeout"), default=300)
+        agent_timeout = _positive_int(data.get("agent_timeout"), default=300, field="agent_timeout")
 
         repo_path = Path(repo_value)
         if not repo_path.is_absolute():
@@ -64,6 +64,7 @@ class TaskConfig:
             "test_command": self.test_command,
             "agents": list(self.agents),
             "patch_only": self.patch_only,
+            "agent_timeout": self.agent_timeout,
         }
 
 
@@ -182,11 +183,11 @@ def _optional_string(value: object) -> str:
     return value.strip()
 
 
-def _positive_int(value: object, default: int) -> int:
+def _positive_int(value: object, default: int, field: str = "value") -> int:
     if value is None:
         return default
     if not isinstance(value, int) or value <= 0:
-        raise ValueError("'agent_timeout' must be a positive integer (seconds)")
+        raise ValueError(f"'{field}' must be a positive integer (seconds)")
     return value
 
 
