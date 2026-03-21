@@ -19,7 +19,7 @@ class TaskConfig:
     test_command: str = ""
     agents: list[str] = field(default_factory=lambda: ["codex", "claude"])
     patch_only: bool = False
-    agent_timeout: int = 300
+    agent_timeout: int = 1800
 
     @classmethod
     def from_file(cls, task_file: Path) -> "TaskConfig":
@@ -38,7 +38,7 @@ class TaskConfig:
         test_command = _optional_string(data.get("test_command"))
         agents = _agent_list(data.get("agents"))
         patch_only = bool(data.get("patch_only", False))
-        agent_timeout = _positive_int(data.get("agent_timeout"), default=300, field="agent_timeout")
+        agent_timeout = _positive_int(data.get("agent_timeout"), default=1800, field="agent_timeout")
 
         repo_path = Path(repo_value)
         if not repo_path.is_absolute():

@@ -82,7 +82,7 @@ Fields:
 - `test_command`: Optional shell command; skipped when empty
 - `agents`: Optional list of agents (no duplicates); defaults to `codex` and `claude`
 - `patch_only`: Optional boolean (default `false`); restricts agents to file edits only — no shell commands. For Claude, enforced via `--permission-mode acceptEdits`; for other agents, communicated via `AGENTS.md`
-- `agent_timeout`: Optional integer (default `300`); maximum seconds each agent process may run before it is killed and the result recorded as `error`
+- `agent_timeout`: Optional integer (default `1800`); maximum seconds each agent process may run before it is killed and the result recorded as `error`
 
 `repo_path` may be relative to the location of `task.yaml`.
 
