@@ -76,7 +76,7 @@ agents:
 Fields:
 
 - `name`: Run name used under `runs/<name>/`; must be a single path component (no `/` or `..`)
-- `repo_path`: Local path to a git repository
+- `repo_path`: Local path to a directory (git repository or plain directory)
 - `prompt`: Task instructions given to each agent
 - `compile_command`: Optional shell command; skipped when empty
 - `test_command`: Optional shell command; skipped when empty

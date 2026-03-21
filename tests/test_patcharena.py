@@ -263,6 +263,21 @@ class WorkspaceTests(unittest.TestCase):
             agents_content = (prepared.path / "AGENTS.md").read_text(encoding="utf-8")
             self.assertIn("Do not run shell commands", agents_content)
 
+    def test_prepare_works_with_plain_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_dir = root / "source"
+            source_dir.mkdir()
+            (source_dir / "main.py").write_text("print('hello')\n", encoding="utf-8")
+
+            manager = WorkspaceManager(root / "runs")
+            task = TaskConfig(name="plain-dir-task", repo_path=source_dir, prompt="Make a change")
+
+            prepared = manager.prepare(task, "codex")
+
+            self.assertTrue((prepared.path / ".git").exists())
+            self.assertTrue((prepared.path / "main.py").exists())
+
     def test_prepare_clones_repo_and_writes_task_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -326,6 +341,36 @@ class PatchTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_error_result_propagates_reason_to_compile_and_test_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task_file = root / "task.yaml"
+            task_file.write_text(
+                "\n".join(
+                    [
+                        "name: error-task",
+                        f"repo_path: {root / 'does_not_exist'}",
+                        "prompt: Test",
+                        "agents:",
+                        "  - fake",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            report = run_task_file(
+                task_file,
+                runs_root=root / "runs",
+                agent_registry={"fake": FakeAgent()},
+            )
+
+            result = report.results[0]
+            self.assertEqual(result.status, "error")
+            self.assertIn("does not exist", result.agent_result.stderr)
+            self.assertIn("does not exist", result.compile_result.stderr)
+            self.assertIn("does not exist", result.test_result.stderr)
+
     def test_run_task_file_rejects_duplicate_agents(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

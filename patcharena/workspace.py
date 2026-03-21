@@ -44,20 +44,15 @@ class WorkspaceManager:
         return self.workspace_dir(task_name, agent_name) / "fix.patch"
 
     def prepare(self, task: TaskConfig, agent_name: str, patch_only: bool = False) -> PreparedWorkspace:
-        repo_path = self.validate_repo(task.repo_path)
+        source = self.validate_source(task.repo_path)
         workspace = self.workspace_dir(task.name, agent_name)
         self.run_dir(task.name).mkdir(parents=True, exist_ok=True)
         _remove_path(workspace)
 
-        clone_result = subprocess.run(
-            ["git", "clone", str(repo_path), str(workspace)],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=git_environment(),
-        )
-        if clone_result.returncode != 0:
-            raise RuntimeError(clone_result.stderr.strip() or "git clone failed")
+        if _is_git_repo(source):
+            _git_clone(source, workspace)
+        else:
+            _copy_and_init(source, workspace)
 
         excluded_paths = ["PATCHARENA_TASK.md"]
         self.task_path(task.name, agent_name).write_text(
@@ -83,21 +78,10 @@ class WorkspaceManager:
             excluded_patch_paths=excluded_paths,
         )
 
-    def validate_repo(self, repo_path: Path) -> Path:
-        resolved = Path(repo_path).resolve()
-        if not resolved.exists():
-            raise ValueError(f"repository path does not exist: {resolved}")
-
-        check_result = subprocess.run(
-            ["git", "-C", str(resolved), "rev-parse", "--is-inside-work-tree"],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=git_environment(),
-        )
-        if check_result.returncode != 0:
-            raise ValueError(f"repository path is not a git repository: {resolved}")
-
+    def validate_source(self, source_path: Path) -> Path:
+        resolved = Path(source_path).resolve()
+        if not resolved.is_dir():
+            raise ValueError(f"source path does not exist or is not a directory: {resolved}")
         return resolved
 
     def render_task_markdown(self, task: TaskConfig) -> str:
@@ -112,6 +96,48 @@ class WorkspaceManager:
 
     def read_template(self, template_name: str) -> str:
         return (self.templates_dir / template_name).read_text(encoding="utf-8")
+
+
+def _is_git_repo(path: Path) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        check=False,
+        env=git_environment(),
+    )
+    return result.returncode == 0
+
+
+def _git_clone(source: Path, workspace: Path) -> None:
+    result = subprocess.run(
+        ["git", "clone", str(source), str(workspace)],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=git_environment(),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "git clone failed")
+
+
+def _copy_and_init(source: Path, workspace: Path) -> None:
+    shutil.copytree(source, workspace)
+    for command in [
+        ["git", "init"],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.name=PatchArena", "-c", "user.email=patcharena@example.com",
+         "commit", "--allow-empty", "-m", "patcharena: initial snapshot"],
+    ]:
+        result = subprocess.run(
+            command,
+            cwd=workspace,
+            text=True,
+            capture_output=True,
+            check=False,
+            env=git_environment(),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"git {command[1]} failed")
 
 
 def _remove_path(path: Path) -> None:

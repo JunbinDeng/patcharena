@@ -57,7 +57,7 @@ All agents extend `BaseAgent` and implement `build_command(task, workspace) -> l
 
 ```yaml
 name: string               # single path component, no / or ..
-repo_path: string          # path to the git repo to benchmark against
+repo_path: string          # path to the directory to benchmark against (git repo or plain dir)
 prompt: string             # task instructions for agents
 compile_command: string    # optional validation command
 test_command: string       # optional validation command

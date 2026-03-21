@@ -204,8 +204,8 @@ def error_result(
         stderr=message,
         duration_seconds=0.0,
     )
-    compile_result = skipped_result("validation skipped because the run failed")
-    test_result = skipped_result("validation skipped because the run failed")
+    compile_result = skipped_result(f"validation skipped: {message}")
+    test_result = skipped_result(f"validation skipped: {message}")
 
     if workspace is None:
         workspace_path = workspace_manager.workspace_dir(task.name, agent_name)
