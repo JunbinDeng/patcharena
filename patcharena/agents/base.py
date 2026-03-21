@@ -21,12 +21,12 @@ class BaseAgent:
     def is_available(self) -> bool:
         return shutil.which(self.binary_name) is not None
 
-    def build_command(self, prompt: str, workspace: Path) -> list[str]:
+    def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
         raise NotImplementedError
 
-    def run(self, task_prompt: str, workspace: Path) -> CommandResult:
+    def run(self, task_prompt: str, workspace: Path, patch_only: bool = False) -> CommandResult:
         workspace = workspace.resolve()
-        command = self.build_command(task_prompt, workspace)
+        command = self.build_command(task_prompt, workspace, patch_only)
         if not self.is_available():
             return CommandResult(
                 command=" ".join(command),

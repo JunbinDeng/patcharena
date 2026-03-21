@@ -66,8 +66,8 @@ def _run_agent_benchmark(
 ) -> AgentRunResult:
     workspace = None
     try:
-        workspace = workspace_manager.prepare(task, agent.name)
-        agent_result = agent.run(task.prompt, workspace.path)
+        workspace = workspace_manager.prepare(task, agent.name, task.patch_only)
+        agent_result = agent.run(task.prompt, workspace.path, task.patch_only)
 
         if agent_result.exit_code is None:
             compile_result = skipped_result("validation skipped because the agent did not start")

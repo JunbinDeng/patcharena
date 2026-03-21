@@ -4,6 +4,7 @@ prompt: |
   Fix the failing behavior and keep the project runnable.
 compile_command: ""
 test_command: pytest
+patch_only: false
 agents:
   - codex
   - claude

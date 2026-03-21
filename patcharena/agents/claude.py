@@ -11,5 +11,6 @@ class ClaudeAgent(BaseAgent):
     name = "claude"
     binary_name = "claude"
 
-    def build_command(self, prompt: str, workspace: Path) -> list[str]:
-        return ["claude", "-p", "--permission-mode", "bypassPermissions", prompt]
+    def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
+        permission_mode = "acceptEdits" if patch_only else "bypassPermissions"
+        return ["claude", "-p", "--permission-mode", permission_mode, prompt]

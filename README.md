@@ -64,6 +64,7 @@ prompt: |
   Fix the failing behavior and keep the project runnable.
 compile_command: ""
 test_command: pytest
+patch_only: false
 agents:
   - codex
   - claude
@@ -79,6 +80,7 @@ Fields:
 - `compile_command`: Optional shell command; skipped when empty
 - `test_command`: Optional shell command; skipped when empty
 - `agents`: Optional list of agents; defaults to `codex` and `claude`
+- `patch_only`: Optional boolean (default `false`); restricts agents to file edits only — no shell commands. For Claude, enforced via `--permission-mode acceptEdits`; for other agents, communicated via `AGENTS.md`
 
 `repo_path` may be relative to the location of `task.yaml`.
 

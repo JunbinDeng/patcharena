@@ -11,5 +11,5 @@ class CopilotAgent(BaseAgent):
     name = "copilot"
     binary_name = "copilot"
 
-    def build_command(self, prompt: str, workspace: Path) -> list[str]:
+    def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
         return ["copilot", "agent", prompt]

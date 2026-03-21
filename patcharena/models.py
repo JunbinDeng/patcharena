@@ -18,6 +18,7 @@ class TaskConfig:
     compile_command: str = ""
     test_command: str = ""
     agents: list[str] = field(default_factory=lambda: ["codex", "claude"])
+    patch_only: bool = False
 
     @classmethod
     def from_file(cls, task_file: Path) -> "TaskConfig":
@@ -30,6 +31,7 @@ class TaskConfig:
         compile_command = _optional_string(data.get("compile_command"))
         test_command = _optional_string(data.get("test_command"))
         agents = _agent_list(data.get("agents"))
+        patch_only = bool(data.get("patch_only", False))
 
         repo_path = Path(repo_value)
         if not repo_path.is_absolute():
@@ -42,6 +44,7 @@ class TaskConfig:
             compile_command=compile_command,
             test_command=test_command,
             agents=agents,
+            patch_only=patch_only,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -52,6 +55,7 @@ class TaskConfig:
             "compile_command": self.compile_command,
             "test_command": self.test_command,
             "agents": list(self.agents),
+            "patch_only": self.patch_only,
         }
 
 

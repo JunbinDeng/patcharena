@@ -25,10 +25,10 @@ class FakeAgent(BaseAgent):
     def is_available(self) -> bool:
         return True
 
-    def build_command(self, prompt: str, workspace: Path) -> list[str]:
+    def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
         return ["fake"]
 
-    def run(self, task_prompt: str, workspace: Path) -> CommandResult:
+    def run(self, task_prompt: str, workspace: Path, patch_only: bool = False) -> CommandResult:
         target = workspace / "hello.txt"
         target.write_text("done\n", encoding="utf-8")
         return CommandResult(
@@ -45,7 +45,7 @@ class RelativePathAgent(BaseAgent):
     name = "relative"
     binary_name = "path-check"
 
-    def build_command(self, prompt: str, workspace: Path) -> list[str]:
+    def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
         return ["path-check", str(workspace)]
 
 
