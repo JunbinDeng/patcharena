@@ -8,6 +8,10 @@ from pathlib import Path
 import yaml
 
 
+DEFAULT_AGENT_TIMEOUT: int = 1800
+DEFAULT_AGENTS: list[str] = ["codex", "claude"]
+
+
 @dataclass(slots=True)
 class TaskConfig:
     """Configuration loaded from a task YAML file."""
@@ -17,9 +21,9 @@ class TaskConfig:
     prompt: str
     compile_command: str = ""
     test_command: str = ""
-    agents: list[str] = field(default_factory=lambda: ["codex", "claude"])
+    agents: list[str] = field(default_factory=lambda: list(DEFAULT_AGENTS))
     patch_only: bool = False
-    agent_timeout: int = 1800
+    agent_timeout: int = DEFAULT_AGENT_TIMEOUT
 
     @classmethod
     def from_file(cls, task_file: Path) -> "TaskConfig":
@@ -38,7 +42,7 @@ class TaskConfig:
         test_command = _optional_string(data.get("test_command"))
         agents = _agent_list(data.get("agents"))
         patch_only = bool(data.get("patch_only", False))
-        agent_timeout = _positive_int(data.get("agent_timeout"), default=1800, field="agent_timeout")
+        agent_timeout = _positive_int(data.get("agent_timeout"), default=DEFAULT_AGENT_TIMEOUT, field="agent_timeout")
 
         repo_path = Path(repo_value)
         if not repo_path.is_absolute():
@@ -193,7 +197,7 @@ def _positive_int(value: object, default: int, field: str = "value") -> int:
 
 def _agent_list(value: object) -> list[str]:
     if value is None:
-        return ["codex", "claude"]
+        return list(DEFAULT_AGENTS)
     if not isinstance(value, list) or not value:
         raise ValueError("'agents' must be a non-empty list of strings")
 

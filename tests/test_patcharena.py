@@ -93,12 +93,42 @@ class TaskConfigTests(unittest.TestCase):
 
             config = TaskConfig.from_file(task_file)
 
+            from patcharena.models import DEFAULT_AGENTS
             self.assertEqual(config.name, "sample-task")
             self.assertEqual(config.repo_path, (root / "repo").resolve())
             self.assertEqual(config.prompt, "Fix the bug")
             self.assertEqual(config.compile_command, "")
             self.assertEqual(config.test_command, "")
-            self.assertEqual(config.agents, ["codex", "claude"])
+            self.assertEqual(config.agents, DEFAULT_AGENTS)
+
+    def test_constants_are_exported(self) -> None:
+        from patcharena.models import DEFAULT_AGENT_TIMEOUT, DEFAULT_AGENTS
+
+        self.assertIsInstance(DEFAULT_AGENT_TIMEOUT, int)
+        self.assertGreater(DEFAULT_AGENT_TIMEOUT, 0)
+        self.assertIsInstance(DEFAULT_AGENTS, list)
+        self.assertTrue(all(isinstance(a, str) for a in DEFAULT_AGENTS))
+
+    def test_direct_constructor_and_from_file_share_defaults(self) -> None:
+        """Both code paths must use the same default values."""
+        from patcharena.models import DEFAULT_AGENT_TIMEOUT, DEFAULT_AGENTS
+
+        # Direct constructor
+        direct = TaskConfig(name="t", repo_path=Path("."), prompt="p")
+        self.assertEqual(direct.agent_timeout, DEFAULT_AGENT_TIMEOUT)
+        self.assertEqual(direct.agents, DEFAULT_AGENTS)
+
+        # from_file() with no optional fields
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task_file = root / "task.yaml"
+            task_file.write_text(
+                "name: t\nrepo_path: ./repo\nprompt: p\n",
+                encoding="utf-8",
+            )
+            loaded = TaskConfig.from_file(task_file)
+        self.assertEqual(loaded.agent_timeout, DEFAULT_AGENT_TIMEOUT)
+        self.assertEqual(loaded.agents, DEFAULT_AGENTS)
 
     def test_from_file_accepts_all_supported_agents(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
