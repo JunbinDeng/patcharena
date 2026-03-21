@@ -11,7 +11,12 @@ from unittest import mock
 from patcharena.agents import get_agent_registry
 from patcharena.agents.base import BaseAgent
 from patcharena.cli import main
-from patcharena.models import CommandResult, TaskConfig
+from patcharena.models import (
+    CommandResult,
+    DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_AGENTS,
+    TaskConfig,
+)
 from patcharena.patch import extract_patch
 from patcharena.result_parser import parse_shortstat
 from patcharena.runner import run_task_file
@@ -93,7 +98,6 @@ class TaskConfigTests(unittest.TestCase):
 
             config = TaskConfig.from_file(task_file)
 
-            from patcharena.models import DEFAULT_AGENTS
             self.assertEqual(config.name, "sample-task")
             self.assertEqual(config.repo_path, (root / "repo").resolve())
             self.assertEqual(config.prompt, "Fix the bug")
@@ -102,8 +106,6 @@ class TaskConfigTests(unittest.TestCase):
             self.assertEqual(config.agents, DEFAULT_AGENTS)
 
     def test_constants_are_exported(self) -> None:
-        from patcharena.models import DEFAULT_AGENT_TIMEOUT, DEFAULT_AGENTS
-
         self.assertIsInstance(DEFAULT_AGENT_TIMEOUT, int)
         self.assertGreater(DEFAULT_AGENT_TIMEOUT, 0)
         self.assertIsInstance(DEFAULT_AGENTS, list)
@@ -111,8 +113,6 @@ class TaskConfigTests(unittest.TestCase):
 
     def test_direct_constructor_and_from_file_share_defaults(self) -> None:
         """Both code paths must use the same default values."""
-        from patcharena.models import DEFAULT_AGENT_TIMEOUT, DEFAULT_AGENTS
-
         # Direct constructor
         direct = TaskConfig(name="t", repo_path=Path("."), prompt="p")
         self.assertEqual(direct.agent_timeout, DEFAULT_AGENT_TIMEOUT)
