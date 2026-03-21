@@ -2,8 +2,6 @@
 
 Task name: $name
 
-Repository: $repo_path
-
 ## Prompt
 
 $prompt
