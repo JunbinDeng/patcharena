@@ -22,7 +22,6 @@ class TaskConfig:
     compile_command: str = ""
     test_command: str = ""
     agents: list[str] = field(default_factory=lambda: list(DEFAULT_AGENTS))
-    patch_only: bool = False
     agent_timeout: int = DEFAULT_AGENT_TIMEOUT
 
     @classmethod
@@ -41,7 +40,6 @@ class TaskConfig:
         compile_command = _optional_string(data.get("compile_command"))
         test_command = _optional_string(data.get("test_command"))
         agents = _agent_list(data.get("agents"))
-        patch_only = bool(data.get("patch_only", False))
         agent_timeout = _positive_int(data.get("agent_timeout"), default=DEFAULT_AGENT_TIMEOUT, field="agent_timeout")
 
         repo_path = Path(repo_value)
@@ -55,7 +53,6 @@ class TaskConfig:
             compile_command=compile_command,
             test_command=test_command,
             agents=agents,
-            patch_only=patch_only,
             agent_timeout=agent_timeout,
         )
 
@@ -67,7 +64,6 @@ class TaskConfig:
             "compile_command": self.compile_command,
             "test_command": self.test_command,
             "agents": list(self.agents),
-            "patch_only": self.patch_only,
             "agent_timeout": self.agent_timeout,
         }
 

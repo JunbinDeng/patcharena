@@ -64,7 +64,6 @@ prompt: |
   Fix the failing behavior and keep the project runnable.
 compile_command: ""
 test_command: pytest
-patch_only: false
 agent_timeout: 1800
 agents:
   - codex
@@ -81,7 +80,6 @@ Fields:
 - `compile_command`: Optional shell command; skipped when empty
 - `test_command`: Optional shell command; skipped when empty
 - `agents`: Optional list of agents (no duplicates); defaults to `codex` and `claude`
-- `patch_only`: Optional boolean (default `false`); restricts agents to file edits only — no shell commands. For Claude, enforced via `--permission-mode acceptEdits`; for other agents, communicated via `AGENTS.md`
 - `agent_timeout`: Optional integer (default `1800`); maximum seconds each agent process may run before it is killed and the result recorded as `error`
 
 `repo_path` may be relative to the location of `task.yaml`.
@@ -166,7 +164,7 @@ report.
 
 1. Load `task.yaml`
 2. Clone or copy the source into one workspace per agent
-3. Write `PATCHARENA_TASK.md` into each workspace
+3. Write `PATCHARENA_TASK.md` into each workspace; each agent injects its own files via `setup_workspace()`
 4. Run each agent in parallel
 5. Run optional compile and test commands
 6. Save `fix.patch` using `git diff`

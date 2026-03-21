@@ -43,7 +43,7 @@ class WorkspaceManager:
     def patch_path(self, task_name: str, agent_name: str) -> Path:
         return self.workspace_dir(task_name, agent_name) / "fix.patch"
 
-    def prepare(self, task: TaskConfig, agent_name: str, patch_only: bool = False) -> PreparedWorkspace:
+    def prepare(self, task: TaskConfig, agent_name: str) -> PreparedWorkspace:
         source = self.validate_source(task.repo_path)
         workspace = self.workspace_dir(task.name, agent_name)
         self.run_dir(task.name).mkdir(parents=True, exist_ok=True)
@@ -62,8 +62,6 @@ class WorkspaceManager:
 
         agents_file = workspace / "AGENTS.md"
         patcharena_content = self.read_template("AGENTS.md")
-        if patch_only:
-            patcharena_content += "- Do not run shell commands or execute code. Only read and write files.\n"
         if agents_file.exists():
             existing = agents_file.read_text(encoding="utf-8")
             agents_file.write_text(existing.rstrip("\n") + "\n\n" + patcharena_content, encoding="utf-8")

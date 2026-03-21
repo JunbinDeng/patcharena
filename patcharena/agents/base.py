@@ -21,18 +21,21 @@ class BaseAgent:
     def is_available(self) -> bool:
         return shutil.which(self.binary_name) is not None
 
-    def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
+    def setup_workspace(self, workspace: Path) -> list[str]:
+        """Inject agent-specific files. Returns paths to exclude from patch."""
+        return []
+
+    def build_command(self, prompt: str, workspace: Path) -> list[str]:
         raise NotImplementedError
 
     def run(
         self,
         task_prompt: str,
         workspace: Path,
-        patch_only: bool = False,
         timeout: int | None = None,
     ) -> CommandResult:
         workspace = workspace.resolve()
-        command = self.build_command(task_prompt, workspace, patch_only)
+        command = self.build_command(task_prompt, workspace)
         if not self.is_available():
             return CommandResult(
                 command=" ".join(command),

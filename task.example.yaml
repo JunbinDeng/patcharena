@@ -4,7 +4,6 @@ prompt: |
   Fix the failing behavior and keep the project runnable.
 compile_command: ""
 test_command: pytest
-patch_only: false
 agent_timeout: 1800
 agents:
   - codex

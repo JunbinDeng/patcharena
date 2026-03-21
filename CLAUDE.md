@@ -26,19 +26,19 @@ PatchArena is a benchmarking tool that runs multiple AI coding agents (Claude, C
 1. **CLI** (`cli.py`) parses `task.yaml` → calls `runner.run_task_file()`
 2. **Runner** (`runner.py`) validates agents, spawns `ThreadPoolExecutor` to run `_run_agent_benchmark()` per agent
 3. **WorkspaceManager** (`workspace.py`) creates isolated git clones under `runs/<task-name>/<agent>/`, writes `PATCHARENA_TASK.md` (rendered from `templates/PATCHARENA_TASK.md.template`) and `AGENTS.md`
-4. Each agent's CLI is invoked in its workspace; optional compile/test commands validate the result
+4. Each agent's `setup_workspace()` hook runs to inject agent-specific files (e.g. Claude writes `.claude/settings.json`); then the agent CLI is invoked; optional compile/test commands validate the result
 5. **Patch extraction** (`patch.py`) runs `git diff --binary` (excluding task/agent files) and `git diff --shortstat`
 6. **Report** (`report.py`) writes `runs/<task-name>/benchmark_report.json`
 
 ### Key Models (`models.py`)
 
-- `TaskConfig` — loaded from YAML; fields: `name`, `repo_path`, `prompt`, `compile_command`, `test_command`, `agents`, `patch_only`, `agent_timeout`
+- `TaskConfig` — loaded from YAML; fields: `name`, `repo_path`, `prompt`, `compile_command`, `test_command`, `agents`, `agent_timeout`
 - `AgentRunResult` — per-agent outcome: status, timing, patch stats, stdout/stderr, exit codes
 - `BenchmarkReport` — aggregates all `AgentRunResult`s with summary statistics
 
 ### Agent System (`patcharena/agents/`)
 
-All agents extend `BaseAgent` and implement `build_command(task, workspace) -> list[str]`. The agent registry is a dict in `runner.py` mapping name strings to agent classes.
+All agents extend `BaseAgent` and implement `build_command(prompt, workspace) -> list[str]`. Agents may also override `setup_workspace(workspace) -> list[str]` to inject agent-specific files into the workspace (returns paths to exclude from the patch). The agent registry is a dict in `runner.py` mapping name strings to agent classes.
 
 | Agent | Binary | Prompt delivery |
 |-------|--------|-----------------|
@@ -46,8 +46,6 @@ All agents extend `BaseAgent` and implement `build_command(task, workspace) -> l
 | codex | `codex` | stdin |
 | opencode | `opencode` | CLI arg |
 | copilot | `copilot` | CLI arg |
-
-`patch_only=true` in the task config restricts agents to file edits only (Claude uses `acceptEdits` permission mode; others receive guidance via `AGENTS.md`).
 
 ### Git Environment (`git_env.py`)
 
@@ -62,7 +60,6 @@ prompt: string             # task instructions for agents
 compile_command: string    # optional validation command
 test_command: string       # optional validation command
 agents: [codex, claude]    # default; also supports opencode, copilot; no duplicates
-patch_only: false          # restrict agents to file edits only
 agent_timeout: 1800        # seconds before agent process is killed (default: 1800)
 ```
 

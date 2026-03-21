@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from patcharena.agents.base import BaseAgent
@@ -11,6 +12,24 @@ class ClaudeAgent(BaseAgent):
     name = "claude"
     binary_name = "claude"
 
-    def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
-        permission_mode = "acceptEdits" if patch_only else "bypassPermissions"
-        return ["claude", "-p", "--permission-mode", permission_mode, prompt]
+    def setup_workspace(self, workspace: Path) -> list[str]:
+        claude_dir = workspace / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        settings = {
+            "permissions": {
+                "allow": [
+                    "Edit(*)",
+                    "Write(*)",
+                    "Bash(*)",
+                ]
+            }
+        }
+        (claude_dir / "settings.json").write_text(
+            json.dumps(settings, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return [".claude/settings.json"]
+
+    def build_command(self, prompt: str, workspace: Path) -> list[str]:
+        del workspace
+        return ["claude", "-p", prompt]

@@ -30,10 +30,10 @@ class FakeAgent(BaseAgent):
     def is_available(self) -> bool:
         return True
 
-    def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
+    def build_command(self, prompt: str, workspace: Path) -> list[str]:
         return ["fake"]
 
-    def run(self, task_prompt: str, workspace: Path, patch_only: bool = False, timeout: int | None = None) -> CommandResult:
+    def run(self, task_prompt: str, workspace: Path, timeout: int | None = None) -> CommandResult:
         target = workspace / "hello.txt"
         target.write_text("done\n", encoding="utf-8")
         return CommandResult(
@@ -55,7 +55,7 @@ class AlwaysAvailableAgent(BaseAgent):
     def is_available(self) -> bool:
         return True
 
-    def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
+    def build_command(self, prompt: str, workspace: Path) -> list[str]:
         return ["always", prompt]
 
 
@@ -63,7 +63,7 @@ class RelativePathAgent(BaseAgent):
     name = "relative"
     binary_name = "path-check"
 
-    def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
+    def build_command(self, prompt: str, workspace: Path) -> list[str]:
         return ["path-check", str(workspace)]
 
 
@@ -218,11 +218,11 @@ class AgentTimeoutTests(unittest.TestCase):
             def is_available(self) -> bool:
                 return True
 
-            def build_command(self, prompt: str, workspace: Path, patch_only: bool = False) -> list[str]:
+            def build_command(self, prompt: str, workspace: Path) -> list[str]:
                 return ["timedout"]
 
-            def run(self, task_prompt: str, workspace: Path, patch_only: bool = False, timeout: int | None = None) -> CommandResult:
-                del task_prompt, patch_only, timeout
+            def run(self, task_prompt: str, workspace: Path, timeout: int | None = None) -> CommandResult:
+                del task_prompt, timeout
                 return CommandResult(
                     command="timedout",
                     exit_code=None,
@@ -331,20 +331,6 @@ class WorkspaceTests(unittest.TestCase):
             self.assertIn("Keep it simple", agents_content)
             self.assertIn("PatchArena Workspace", agents_content)
             self.assertIn("AGENTS.md", prepared.excluded_patch_paths)
-
-    def test_prepare_writes_patch_only_instruction_when_agents_md_exists(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source_repo = create_git_repo(root / "source")
-            (source_repo / "AGENTS.md").write_text("# Project rules\n", encoding="utf-8")
-            commit_file(source_repo, "AGENTS.md")
-            manager = WorkspaceManager(root / "runs")
-            task = TaskConfig(name="patch-only-test", repo_path=source_repo, prompt="Make a change")
-
-            prepared = manager.prepare(task, "codex", patch_only=True)
-
-            agents_content = (prepared.path / "AGENTS.md").read_text(encoding="utf-8")
-            self.assertIn("Do not run shell commands", agents_content)
 
     def test_prepare_works_with_plain_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -79,8 +79,9 @@ def _run_agent_benchmark(
 ) -> AgentRunResult:
     workspace = None
     try:
-        workspace = workspace_manager.prepare(task, agent.name, task.patch_only)
-        agent_result = agent.run(task.prompt, workspace.path, task.patch_only, timeout=task.agent_timeout)
+        workspace = workspace_manager.prepare(task, agent.name)
+        workspace.excluded_patch_paths.extend(agent.setup_workspace(workspace.path))
+        agent_result = agent.run(task.prompt, workspace.path, timeout=task.agent_timeout)
 
         if agent_result.exit_code is None:
             compile_result = skipped_result(f"validation skipped: {agent_result.stderr}")
