@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import shutil
 import subprocess
 import time
 
@@ -45,7 +46,9 @@ def run_task_file(
 
     workspace_manager = WorkspaceManager(runs_root)
     run_dir = workspace_manager.run_dir(task.name)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
 
     results_by_agent: dict[str, AgentRunResult] = {}
     max_workers = max(1, len(task.agents))
