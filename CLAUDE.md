@@ -32,7 +32,7 @@ PatchArena is a benchmarking tool that runs multiple AI coding agents (Claude, C
 
 ### Key Models (`models.py`)
 
-- `TaskConfig` — loaded from YAML; fields: `name`, `repo_path`, `prompt`, `compile_command`, `test_command`, `agents`, `patch_only`
+- `TaskConfig` — loaded from YAML; fields: `name`, `repo_path`, `prompt`, `compile_command`, `test_command`, `agents`, `patch_only`, `agent_timeout`
 - `AgentRunResult` — per-agent outcome: status, timing, patch stats, stdout/stderr, exit codes
 - `BenchmarkReport` — aggregates all `AgentRunResult`s with summary statistics
 

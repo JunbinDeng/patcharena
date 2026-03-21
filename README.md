@@ -65,7 +65,7 @@ prompt: |
 compile_command: ""
 test_command: pytest
 patch_only: false
-agent_timeout: 300
+agent_timeout: 1800
 agents:
   - codex
   - claude
@@ -112,8 +112,9 @@ runs/
       ...
 ```
 
-Each workspace is created by cloning the source repository into a separate
-directory for that agent.
+Each workspace is created by cloning the source repository (or copying and
+initializing a git repo for plain directories) into a separate directory for
+that agent.
 
 ## Report Shape
 
@@ -164,7 +165,7 @@ report.
 ## How It Works
 
 1. Load `task.yaml`
-2. Clone the source repo into one workspace per agent
+2. Clone or copy the source into one workspace per agent
 3. Write `PATCHARENA_TASK.md` into each workspace
 4. Run each agent in parallel
 5. Run optional compile and test commands
