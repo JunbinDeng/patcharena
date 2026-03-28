@@ -23,6 +23,7 @@ class TaskConfig:
     test_command: str = ""
     agents: list[str] = field(default_factory=lambda: list(DEFAULT_AGENTS))
     agent_timeout: int = DEFAULT_AGENT_TIMEOUT
+    agent_options: dict[str, dict] = field(default_factory=dict)
 
     @classmethod
     def from_file(cls, task_file: Path) -> "TaskConfig":
@@ -41,6 +42,7 @@ class TaskConfig:
         test_command = _optional_string(data.get("test_command"))
         agents = _agent_list(data.get("agents"))
         agent_timeout = _positive_int(data.get("agent_timeout"), default=DEFAULT_AGENT_TIMEOUT, field="agent_timeout")
+        agent_options = _agent_options(data.get("agent_options"))
 
         repo_path = Path(repo_value)
         if not repo_path.is_absolute():
@@ -54,6 +56,7 @@ class TaskConfig:
             test_command=test_command,
             agents=agents,
             agent_timeout=agent_timeout,
+            agent_options=agent_options,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -65,6 +68,7 @@ class TaskConfig:
             "test_command": self.test_command,
             "agents": list(self.agents),
             "agent_timeout": self.agent_timeout,
+            "agent_options": {k: dict(v) for k, v in self.agent_options.items()},
         }
 
 
@@ -203,3 +207,18 @@ def _agent_list(value: object) -> list[str]:
             raise ValueError("'agents' must contain only non-empty strings")
         agents.append(item.strip())
     return agents
+
+
+def _agent_options(value: object) -> dict[str, dict]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("'agent_options' must be a mapping of agent names to option dicts")
+    result: dict[str, dict] = {}
+    for key, opts in value.items():
+        if not isinstance(key, str):
+            raise ValueError("'agent_options' keys must be strings")
+        if not isinstance(opts, dict):
+            raise ValueError(f"'agent_options[{key!r}]' must be a mapping")
+        result[key] = dict(opts)
+    return result

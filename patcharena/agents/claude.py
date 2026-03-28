@@ -33,3 +33,8 @@ class ClaudeAgent(BaseAgent):
     def build_command(self, prompt: str, workspace: Path) -> list[str]:
         del workspace
         return ["claude", "-p", prompt]
+
+    def extra_env(self) -> dict[str, str | None]:
+        # Explicitly unset so a CLAUDE_CODE_USE_BEDROCK=1 in the parent
+        # environment doesn't accidentally route this agent through Bedrock.
+        return {"CLAUDE_CODE_USE_BEDROCK": None}

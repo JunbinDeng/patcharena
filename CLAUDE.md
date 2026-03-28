@@ -19,7 +19,7 @@ uv run patcharena --help
 
 ## Architecture
 
-PatchArena is a benchmarking tool that runs multiple AI coding agents (Claude, Codex, OpenCode, Copilot) on the same task in parallel isolated workspaces and generates comparative JSON reports.
+PatchArena is a benchmarking tool that runs multiple AI coding agents (Claude, Claude Bedrock, Codex, OpenCode, Copilot) on the same task in parallel isolated workspaces and generates comparative JSON reports.
 
 ### Data Flow
 
@@ -32,20 +32,28 @@ PatchArena is a benchmarking tool that runs multiple AI coding agents (Claude, C
 
 ### Key Models (`models.py`)
 
-- `TaskConfig` — loaded from YAML; fields: `name`, `repo_path`, `prompt`, `compile_command`, `test_command`, `agents`, `agent_timeout`
+- `TaskConfig` — loaded from YAML; fields: `name`, `repo_path`, `prompt`, `compile_command`, `test_command`, `agents`, `agent_timeout`, `agent_options`
 - `AgentRunResult` — per-agent outcome: status, timing, patch stats, stdout/stderr, exit codes
 - `BenchmarkReport` — aggregates all `AgentRunResult`s with summary statistics
 
 ### Agent System (`patcharena/agents/`)
 
-All agents extend `BaseAgent` and implement `build_command(prompt, workspace) -> list[str]`. Agents may also override `setup_workspace(workspace) -> list[str]` to inject agent-specific files into the workspace (returns paths to exclude from the patch). The agent registry is a dict in `runner.py` mapping name strings to agent classes.
+All agents extend `BaseAgent` and implement:
+- `build_command(prompt, workspace) -> list[str]` — constructs the subprocess command
+- `setup_workspace(workspace) -> list[str]` *(optional)* — injects agent-specific files; returns paths to exclude from the patch
+- `extra_env() -> dict[str, str | None]` *(optional)* — per-agent subprocess environment overrides; a `None` value explicitly unsets the key from the inherited environment
 
-| Agent | Binary | Prompt delivery |
-|-------|--------|-----------------|
-| claude | `claude` | CLI arg |
-| codex | `codex` | stdin |
-| opencode | `opencode` | CLI arg |
-| copilot | `copilot` | CLI arg |
+Provider routing for the `claude` binary is controlled entirely via `extra_env()`: `ClaudeAgent` unsets `CLAUDE_CODE_USE_BEDROCK` (guaranteeing the Anthropic subscription API even if the key is set in the parent shell), while `ClaudeBedrockAgent` sets it to `"1"`. This ensures the two agents are fully isolated in a side-by-side run.
+
+The agent registry is in `agents/__init__.py`; `get_agent_registry(agent_options)` accepts per-agent options from `TaskConfig`.
+
+| Agent | Binary | Prompt delivery | Notes |
+|-------|--------|-----------------|-------|
+| claude | `claude` | CLI arg | Anthropic subscription; always unsets `CLAUDE_CODE_USE_BEDROCK` |
+| claude-bedrock | `claude` | CLI arg | AWS Bedrock; sets `CLAUDE_CODE_USE_BEDROCK=1`; optional `model` (CLI arg) and `region` (`AWS_REGION` env var) via `agent_options` |
+| codex | `codex` | stdin | |
+| opencode | `opencode` | CLI arg | |
+| copilot | `copilot` | CLI arg | |
 
 ### Git Environment (`git_env.py`)
 
@@ -59,8 +67,12 @@ repo_path: string          # path to the directory to benchmark against (git rep
 prompt: string             # task instructions for agents
 compile_command: string    # optional validation command
 test_command: string       # optional validation command
-agents: [codex, claude]    # default; also supports opencode, copilot; no duplicates
+agents: [codex, claude]    # default; also supports claude-bedrock, opencode, copilot; no duplicates
 agent_timeout: 1800        # seconds before agent process is killed (default: 1800)
+agent_options:             # optional per-agent config (currently used by claude-bedrock)
+  claude-bedrock:
+    model: anthropic.claude-3-5-sonnet-20241022-v2:0  # optional; find IDs via: aws bedrock list-foundation-models --by-provider anthropic
+    region: us-east-1                                  # optional; omit to use AWS_REGION / AWS_DEFAULT_REGION env vars
 ```
 
 ### Status Values

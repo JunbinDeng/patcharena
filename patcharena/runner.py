@@ -24,7 +24,7 @@ def run_task_file(
 ):
     task = TaskConfig.from_file(task_file)
     runs_root = Path("runs") if runs_root is None else Path(runs_root)
-    registry = agent_registry or get_agent_registry()
+    registry = agent_registry or get_agent_registry(agent_options=task.agent_options)
 
     seen: set[str] = set()
     duplicates: list[str] = []

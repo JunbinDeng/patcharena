@@ -10,3 +10,9 @@ agents:
   - claude
   - opencode
   - copilot
+  # - claude-bedrock   # requires AWS credentials + Bedrock model access
+
+# agent_options:       # optional per-agent config
+#   claude-bedrock:
+#     model: ""        # Bedrock model ID; find with: aws bedrock list-foundation-models --by-provider anthropic
+#     region: ""       # AWS region; omit to use AWS_REGION env var

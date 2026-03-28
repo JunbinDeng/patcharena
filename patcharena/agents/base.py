@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
@@ -28,6 +29,11 @@ class BaseAgent:
     def build_command(self, prompt: str, workspace: Path) -> list[str]:
         raise NotImplementedError
 
+    def extra_env(self) -> dict[str, str | None]:
+        """Extra environment variables for the agent subprocess.
+        A None value means the key is explicitly unset (removed from the environment)."""
+        return {}
+
     def run(
         self,
         task_prompt: str,
@@ -36,9 +42,13 @@ class BaseAgent:
     ) -> CommandResult:
         workspace = workspace.resolve()
         command = self.build_command(task_prompt, workspace)
+        env_prefix = " ".join(
+            f"{k}={v}" for k, v in self.extra_env().items() if v is not None
+        )
+        command_str = f"{env_prefix} {' '.join(command)}" if env_prefix else " ".join(command)
         if not self.is_available():
             return CommandResult(
-                command=" ".join(command),
+                command=command_str,
                 exit_code=None,
                 passed=False,
                 stdout="",
@@ -46,6 +56,12 @@ class BaseAgent:
                 duration_seconds=0.0,
             )
 
+        env = dict(os.environ)
+        for key, value in self.extra_env().items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
         started_at = time.time()
         try:
             completed = subprocess.run(
@@ -58,10 +74,11 @@ class BaseAgent:
                 capture_output=True,
                 check=False,
                 timeout=timeout,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             return CommandResult(
-                command=" ".join(command),
+                command=command_str,
                 exit_code=None,
                 passed=False,
                 stdout="",
@@ -70,7 +87,7 @@ class BaseAgent:
             )
         except OSError as exc:
             return CommandResult(
-                command=" ".join(command),
+                command=command_str,
                 exit_code=None,
                 passed=False,
                 stdout="",
@@ -79,7 +96,7 @@ class BaseAgent:
             )
 
         return command_result_from_run(
-            command=command,
+            command=command_str,
             exit_code=completed.returncode,
             stdout=completed.stdout,
             stderr=completed.stderr,

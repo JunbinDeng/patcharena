@@ -11,12 +11,7 @@ from unittest import mock
 from patcharena.agents import get_agent_registry
 from patcharena.agents.base import BaseAgent
 from patcharena.cli import main
-from patcharena.models import (
-    CommandResult,
-    DEFAULT_AGENT_TIMEOUT,
-    DEFAULT_AGENTS,
-    TaskConfig,
-)
+from patcharena.models import CommandResult, TaskConfig
 from patcharena.patch import extract_patch
 from patcharena.result_parser import parse_shortstat
 from patcharena.runner import run_task_file
@@ -103,22 +98,33 @@ class TaskConfigTests(unittest.TestCase):
             self.assertEqual(config.prompt, "Fix the bug")
             self.assertEqual(config.compile_command, "")
             self.assertEqual(config.test_command, "")
-            self.assertEqual(config.agents, DEFAULT_AGENTS)
+            self.assertEqual(config.agents, ["codex", "claude"])
 
-    def test_constants_are_exported(self) -> None:
-        self.assertIsInstance(DEFAULT_AGENT_TIMEOUT, int)
-        self.assertGreater(DEFAULT_AGENT_TIMEOUT, 0)
-        self.assertIsInstance(DEFAULT_AGENTS, list)
-        self.assertTrue(all(isinstance(a, str) for a in DEFAULT_AGENTS))
+    def test_from_file_parses_agent_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task_file = root / "task.yaml"
+            task_file.write_text(
+                "\n".join([
+                    "name: bedrock-task",
+                    "repo_path: ./repo",
+                    "prompt: Fix it",
+                    "agents:",
+                    "  - claude",
+                    "  - claude-bedrock",
+                    "agent_options:",
+                    "  claude-bedrock:",
+                    "    model: anthropic.claude-3-7-sonnet-20250219-v1:0",
+                    "    region: us-east-1",
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            config = TaskConfig.from_file(task_file)
+            self.assertEqual(config.agent_options, {
+                "claude-bedrock": {"model": "anthropic.claude-3-7-sonnet-20250219-v1:0", "region": "us-east-1"},
+            })
 
-    def test_direct_constructor_and_from_file_share_defaults(self) -> None:
-        """Both code paths must use the same default values."""
-        # Direct constructor
-        direct = TaskConfig(name="t", repo_path=Path("."), prompt="p")
-        self.assertEqual(direct.agent_timeout, DEFAULT_AGENT_TIMEOUT)
-        self.assertEqual(direct.agents, DEFAULT_AGENTS)
-
-        # from_file() with no optional fields
+    def test_from_file_agent_options_defaults_to_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             task_file = root / "task.yaml"
@@ -126,9 +132,19 @@ class TaskConfigTests(unittest.TestCase):
                 "name: t\nrepo_path: ./repo\nprompt: p\n",
                 encoding="utf-8",
             )
-            loaded = TaskConfig.from_file(task_file)
-        self.assertEqual(loaded.agent_timeout, DEFAULT_AGENT_TIMEOUT)
-        self.assertEqual(loaded.agents, DEFAULT_AGENTS)
+            config = TaskConfig.from_file(task_file)
+            self.assertEqual(config.agent_options, {})
+
+    def test_from_file_rejects_non_dict_agent_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task_file = root / "task.yaml"
+            task_file.write_text(
+                "name: t\nrepo_path: ./repo\nprompt: p\nagent_options: [bad]\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                TaskConfig.from_file(task_file)
 
     def test_from_file_accepts_all_supported_agents(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -143,6 +159,7 @@ class TaskConfigTests(unittest.TestCase):
                         "agents:",
                         "  - codex",
                         "  - claude",
+                        "  - claude-bedrock",
                         "  - opencode",
                         "  - copilot",
                     ]
@@ -155,8 +172,56 @@ class TaskConfigTests(unittest.TestCase):
 
             self.assertEqual(
                 config.agents,
-                ["codex", "claude", "opencode", "copilot"],
+                ["codex", "claude", "claude-bedrock", "opencode", "copilot"],
             )
+
+
+class ClaudeAgentTests(unittest.TestCase):
+    def test_extra_env_unsets_bedrock_flag(self) -> None:
+        from patcharena.agents.claude import ClaudeAgent
+        agent = ClaudeAgent()
+        env = agent.extra_env()
+        self.assertIn("CLAUDE_CODE_USE_BEDROCK", env)
+        self.assertIsNone(env["CLAUDE_CODE_USE_BEDROCK"])
+
+
+class ClaudeBedrockAgentTests(unittest.TestCase):
+    def test_build_command_no_options(self) -> None:
+        from patcharena.agents.claude_bedrock import ClaudeBedrockAgent
+        agent = ClaudeBedrockAgent()
+        cmd = agent.build_command("fix the bug", Path("/workspace"))
+        self.assertEqual(cmd, ["claude", "-p", "fix the bug"])
+
+    def test_build_command_with_model(self) -> None:
+        from patcharena.agents.claude_bedrock import ClaudeBedrockAgent
+        agent = ClaudeBedrockAgent(model="anthropic.claude-3-7-sonnet-20250219-v1:0")
+        cmd = agent.build_command("fix the bug", Path("/workspace"))
+        self.assertEqual(cmd, [
+            "claude", "-p", "fix the bug",
+            "--model", "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        ])
+
+    def test_extra_env_sets_bedrock_flag(self) -> None:
+        from patcharena.agents.claude_bedrock import ClaudeBedrockAgent
+        agent = ClaudeBedrockAgent()
+        self.assertEqual(agent.extra_env(), {"CLAUDE_CODE_USE_BEDROCK": "1"})
+
+    def test_extra_env_includes_region_when_set(self) -> None:
+        from patcharena.agents.claude_bedrock import ClaudeBedrockAgent
+        agent = ClaudeBedrockAgent(region="us-east-1")
+        self.assertEqual(agent.extra_env(), {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-east-1"})
+
+    def test_setup_workspace_writes_settings_json(self) -> None:
+        from patcharena.agents.claude_bedrock import ClaudeBedrockAgent
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            agent = ClaudeBedrockAgent()
+            excluded = agent.setup_workspace(workspace)
+            settings_file = workspace / ".claude" / "settings.json"
+            self.assertTrue(settings_file.exists())
+            settings = json.loads(settings_file.read_text(encoding="utf-8"))
+            self.assertIn("Edit(*)", settings["permissions"]["allow"])
+            self.assertEqual(excluded, [".claude/settings.json"])
 
 
 class AgentRegistryTests(unittest.TestCase):
@@ -165,8 +230,18 @@ class AgentRegistryTests(unittest.TestCase):
 
         self.assertEqual(
             sorted(registry),
-            ["claude", "codex", "copilot", "opencode"],
+            ["claude", "claude-bedrock", "codex", "copilot", "opencode"],
         )
+
+    def test_registry_with_bedrock_options_instantiates_correctly(self) -> None:
+        from patcharena.agents.claude_bedrock import ClaudeBedrockAgent
+        registry = get_agent_registry(
+            agent_options={"claude-bedrock": {"model": "anthropic.claude-3-7-sonnet-20250219-v1:0", "region": "us-east-1"}}
+        )
+        agent = registry["claude-bedrock"]
+        self.assertIsInstance(agent, ClaudeBedrockAgent)
+        self.assertEqual(agent.model, "anthropic.claude-3-7-sonnet-20250219-v1:0")
+        self.assertEqual(agent.region, "us-east-1")
 
 
 class BaseAgentTests(unittest.TestCase):

@@ -9,7 +9,8 @@ same task, executes optional validation commands, extracts a patch with
 Current MVP support:
 
 - Codex
-- Claude
+- Claude (Anthropic subscription)
+- Claude Bedrock (AWS Bedrock)
 - OpenCode
 - Copilot
 - Local source repositories
@@ -68,8 +69,13 @@ agent_timeout: 1800
 agents:
   - codex
   - claude
+  - claude-bedrock
   - opencode
   - copilot
+agent_options:
+  claude-bedrock:
+    model: anthropic.claude-3-5-sonnet-20241022-v2:0  # optional; find IDs via: aws bedrock list-foundation-models --by-provider anthropic
+    region: us-east-1                                  # optional
 ```
 
 Fields:
@@ -79,8 +85,11 @@ Fields:
 - `prompt`: Task instructions given to each agent
 - `compile_command`: Optional shell command; skipped when empty
 - `test_command`: Optional shell command; skipped when empty
-- `agents`: Optional list of agents (no duplicates); defaults to `codex` and `claude`
+- `agents`: Optional list of agents (no duplicates); defaults to `codex` and `claude`; also supports `claude-bedrock`, `opencode`, `copilot`
 - `agent_timeout`: Optional integer (default `1800`); maximum seconds each agent process may run before it is killed and the result recorded as `error`
+- `agent_options`: Optional per-agent configuration map. Currently used by `claude-bedrock`:
+  - `model`: Bedrock model ID; find available IDs with `aws bedrock list-foundation-models --by-provider anthropic`; omit to let the CLI choose
+  - `region`: AWS region (e.g. `us-east-1`); omit to rely on `AWS_REGION` / `AWS_DEFAULT_REGION` environment variables
 
 `repo_path` may be relative to the location of `task.yaml`.
 
@@ -97,6 +106,10 @@ runs/
       fix.patch
       ...
     claude/
+      PATCHARENA_TASK.md
+      fix.patch
+      ...
+    claude-bedrock/
       PATCHARENA_TASK.md
       fix.patch
       ...
@@ -134,7 +147,7 @@ Each agent result includes:
 - `tests_passed`
 - `status`
 - `agent_exit_code`
-- `agent_command`
+- `agent_command` — full command string including any env var overrides (e.g. `CLAUDE_CODE_USE_BEDROCK=1 claude -p ...`)
 - `agent_stdout`
 - `agent_stderr`
 - `compile_exit_code`
