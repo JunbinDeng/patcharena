@@ -224,6 +224,20 @@ class ClaudeBedrockAgentTests(unittest.TestCase):
             self.assertEqual(excluded, [".claude/settings.json"])
 
 
+class OpenCodeAgentTests(unittest.TestCase):
+    def test_setup_workspace_writes_wildcard_permission(self) -> None:
+        from patcharena.agents.opencode import OpenCodeAgent
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            agent = OpenCodeAgent()
+            excluded = agent.setup_workspace(workspace)
+            config_file = workspace / "opencode.json"
+            self.assertTrue(config_file.exists())
+            config = json.loads(config_file.read_text(encoding="utf-8"))
+            self.assertEqual(config["permission"], {"*": "allow"})
+            self.assertEqual(excluded, ["opencode.json"])
+
+
 class AgentRegistryTests(unittest.TestCase):
     def test_registry_includes_all_supported_agents(self) -> None:
         registry = get_agent_registry()

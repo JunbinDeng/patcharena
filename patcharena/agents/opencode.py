@@ -15,9 +15,7 @@ class OpenCodeAgent(BaseAgent):
     def setup_workspace(self, workspace: Path) -> list[str]:
         config = {
             "permission": {
-                "edit": "allow",
-                "bash": "allow",
-                "external_directory": "allow",
+                "*": "allow",
             }
         }
         (workspace / "opencode.json").write_text(
