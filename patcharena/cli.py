@@ -56,3 +56,13 @@ def _print_warnings(report: BenchmarkReport) -> None:
             "agent workspaces only contain committed files",
             file=sys.stderr,
         )
+    unconfirmed = [
+        f"{result.spec.id} run {result.run}: {result.settings_check}"
+        for result in report.results
+        if result.settings_check in ("mismatch", "unverified")
+    ]
+    if unconfirmed:
+        print(
+            f"patcharena: warning: pinned model settings were not confirmed ({'; '.join(unconfirmed)})",
+            file=sys.stderr,
+        )

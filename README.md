@@ -96,7 +96,7 @@ Fields:
 - `prompt`: Task instructions given to each agent
 - `compile_command`: Optional shell command; skipped when empty
 - `test_command`: Optional shell command; skipped when empty
-- `agents`: Optional list of agents (no duplicates); defaults to `codex` and `claude`
+- `agents`: Optional list; defaults to `codex` and `claude`. Each entry is either an agent name or a mapping with `agent`, an optional `id` (defaults to the agent name, must be unique, and names the workspace directory), and optional `model` and `effort` (see [Comparing Agents Fairly](#comparing-agents-fairly))
 - `agent_timeout`: Optional integer (default `1800`); maximum seconds each agent process may run before it is killed and the result recorded as `error`
 - `validation_timeout`: Optional integer (default `600`); maximum seconds each of `compile_command` and `test_command` may run before it is killed and counted as failed
 - `repeat`: Optional integer (default `1`); number of times each agent runs the task, each time in a fresh workspace. Runs of one agent happen one after another; different agents run in parallel
@@ -112,6 +112,53 @@ How `repo_path` becomes a workspace:
 - **Subdirectory of a git repository**: the committed contents of that
   subdirectory are checked out into a fresh repository.
 - **Any other directory**: copied as-is into a fresh repository.
+
+## Comparing Agents Fairly
+
+Unless told otherwise, each agent CLI uses its own default model and reasoning
+effort from your global configuration, so a plain run compares combinations of
+agent and model. Pin both per entry to compare like with like:
+
+```yaml
+agents:
+  - {id: claude-sonnet, agent: claude, model: claude-sonnet-5, effort: high}
+  - {id: copilot-sonnet, agent: copilot, model: claude-sonnet-5, effort: high}
+  - {id: opencode-sonnet, agent: opencode, model: github-copilot/claude-sonnet-5, effort: high}
+  - {id: codex-luna, agent: codex, model: gpt-5.6-luna, effort: high}
+  - {id: copilot-luna, agent: copilot, model: gpt-5.6-luna, effort: high}
+  - {id: opencode-luna, agent: opencode, model: github-copilot/gpt-5.6-luna, effort: high}
+```
+
+`model` and `effort` are passed as each CLI's own flags; valid values differ between CLIs:
+
+| agent | `model` | `effort` |
+|---|---|---|
+| claude | `--model` | `--effort` |
+| codex | `--model` | `-c model_reasoning_effort="..."` |
+| copilot | `--model` | `--effort` |
+| opencode | `--model` (`provider/model`) | `--variant` |
+
+No model is available in every CLI, so compare within groups that share one:
+Claude models run in claude, copilot, and opencode; GPT models in codex,
+copilot, and opencode. What you can actually use depends on your subscriptions:
+a CLI may list a model that your account or plan cannot use, in which case the
+run fails or reports `settings_check: unverified`.
+
+A CLI accepting a flag does not prove the setting took effect. After every run,
+PatchArena reads the model and effort the CLI itself recorded and reports them
+as `observed_model` and `observed_effort`:
+
+- codex: the configuration header printed by `codex exec`
+- claude: the session transcript under `~/.claude/projects/`
+- copilot: the session events under `~/.copilot/session-state/`
+- opencode: the session messages in `~/.local/share/opencode/opencode.db`
+
+`settings_check` is then `verified` (the recorded values are exactly the pinned
+ones), `mismatch`, `unverified` (the CLI recorded nothing for a pinned setting),
+or `not_pinned`. PatchArena warns about `mismatch` and `unverified` runs.
+`model: auto` (supported by copilot) lets the CLI choose a model: the choice is
+still reported as `observed_model`, but there is nothing to verify it against. These
+records are internal files of each CLI and may change between versions.
 
 ## Output Layout
 
@@ -152,19 +199,20 @@ The JSON report contains:
 
 Each agent summary includes:
 
-- `agent`
+- `id`, `agent`, `model`, `effort`
 - `runs`
 - `successful_runs`
 - `pass_at_k`: for every k from 1 to `repeat`, the estimated probability that at
   least one of k runs succeeds (the unbiased estimator from the Codex paper);
   `pass_at_k["1"]` is the success rate
 - `status_counts`
+- `settings_checks`: how many runs got each `settings_check` value
 - `mean_runtime_seconds`
 - `mean_patch_lines`
 
 Each result includes:
 
-- `agent`
+- `id`, `agent`, `model`, `effort`
 - `run`
 - `runtime_seconds`
 - `patch_lines`
@@ -174,10 +222,12 @@ Each result includes:
 - `compile_passed`
 - `tests_passed`
 - `status`
+- `observed_model`, `observed_effort`, `settings_check`
 - `agent_exit_code`
 - `agent_command`
 - `agent_stdout`
 - `agent_stderr`
+- `agent_errors`: errors the agent CLI recorded even though it exited with status 0
 - `compile_exit_code`
 - `compile_command`
 - `compile_stdout`
@@ -193,7 +243,9 @@ Status values:
 
 - `success`
 - `validation_failed`
-- `agent_failed`
+- `agent_failed`: the agent CLI exited with a non-zero status, or recorded
+  errors (`agent_errors`) despite exiting with 0, as opencode does when its
+  requests fail
 - `error`
 
 PatchArena does not currently expose per-agent output settings in `task.yaml`

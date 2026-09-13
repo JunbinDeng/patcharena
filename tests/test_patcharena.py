@@ -5,11 +5,14 @@ import functools
 import io
 import json
 import os
+import re
+import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -29,9 +32,12 @@ from patcharena.models import (
     DEFAULT_AGENTS,
     DEFAULT_REPEAT,
     DEFAULT_VALIDATION_TIMEOUT,
+    AgentSpec,
     BenchmarkReport,
     CommandResult,
+    RunObservation,
     TaskConfig,
+    check_settings,
 )
 from patcharena.patch import extract_patch
 from patcharena.report import pass_at_k
@@ -69,6 +75,7 @@ class CheatingAgent(FakeAgent):
     """Writes a wrong answer, then rewrites the visible test so that it passes anyway."""
 
     def __init__(self) -> None:
+        # A list, so that copies made by with_settings() record into the same place.
         self.hidden_tests_seen: list[bool] = []
 
     def run(self, task_prompt: str, workspace: Path, timeout: float | None = None) -> CommandResult:
@@ -77,6 +84,23 @@ class CheatingAgent(FakeAgent):
         (workspace / "hello.txt").write_text("wrong\n", encoding="utf-8")
         (workspace / "check.sh").write_text("exit 0\n", encoding="utf-8")
         return result
+
+
+class PinnableAgent(FakeAgent):
+    """Echoes its settings and observes its model, but not its effort, as a CLI might."""
+
+    def run(self, task_prompt: str, workspace: Path, timeout: float | None = None) -> CommandResult:
+        return replace(super().run(task_prompt, workspace, timeout), stdout=f"{self.model} {self.effort}")
+
+    def observe_run(self, workspace: Path, started_at: float, result: CommandResult) -> RunObservation:
+        return RunObservation(models=[self.model] if self.model else [])
+
+
+class SilentlyFailingAgent(FakeAgent):
+    """Exits with status 0, but its CLI recorded that the request failed."""
+
+    def observe_run(self, workspace: Path, started_at: float, result: CommandResult) -> RunObservation:
+        return RunObservation(errors=["The requested model is not supported."])
 
 
 class ShellAgent(BaseAgent):
@@ -136,7 +160,7 @@ class TaskConfigTests(TempDirTestCase):
         self.assertEqual((config.name, config.prompt), ("task", "Test"))
         self.assertEqual(config.repo_path, (self.root / "repo").resolve())
         self.assertEqual((config.compile_command, config.test_command), ("", ""))
-        self.assertEqual(config.agents, DEFAULT_AGENTS)
+        self.assertEqual([spec.id for spec in config.agents], DEFAULT_AGENTS)
         self.assertEqual(
             (config.agent_timeout, config.validation_timeout, config.repeat, config.hidden_tests),
             (DEFAULT_AGENT_TIMEOUT, DEFAULT_VALIDATION_TIMEOUT, DEFAULT_REPEAT, None),
@@ -150,14 +174,25 @@ class TaskConfigTests(TempDirTestCase):
             validation_timeout=90,
             repeat=3,
             hidden_tests="./hidden",
-            agents=["codex", "copilot"],
+            agents=[
+                "codex",
+                {"id": "claude-sonnet", "agent": "claude", "model": "claude-sonnet-5", "effort": "high"},
+                {"agent": "copilot", "model": "gpt-5.6-luna"},
+            ],
         )
 
         config = TaskConfig.from_file(task_file)
 
         self.assertEqual((config.agent_timeout, config.validation_timeout, config.repeat), (120, 90, 3))
         self.assertEqual(config.hidden_tests, (self.root / "hidden").resolve())
-        self.assertEqual(config.agents, ["codex", "copilot"])
+        self.assertEqual(
+            config.agents,
+            [
+                AgentSpec(id="codex", agent="codex"),
+                AgentSpec(id="claude-sonnet", agent="claude", model="claude-sonnet-5", effort="high"),
+                AgentSpec(id="copilot", agent="copilot", model="gpt-5.6-luna"),
+            ],
+        )
 
     def test_from_file_rejects_invalid_values(self) -> None:
         (self.root / "repo" / "tests").mkdir(parents=True)
@@ -165,8 +200,11 @@ class TaskConfigTests(TempDirTestCase):
             "name with a separator": {"name": "../escape"},
             "boolean timeout": {"agent_timeout": True},
             "zero repeat": {"repeat": 0},
+            "agent entry without agent": {"agents": [{"model": "claude-sonnet-5"}]},
+            "agent id with a separator": {"agents": [{"id": "a/b", "agent": "claude"}]},
+            "unknown agent field": {"agents": [{"agent": "claude", "temperature": 0}]},
             "agent entry of the wrong type": {"agents": [42]},
-            "duplicate agents": {"agents": ["codex", "codex"]},
+            "duplicate agent ids": {"agents": ["codex", {"agent": "codex", "model": "m"}]},
             "missing hidden tests": {"hidden_tests": "./missing"},
             "hidden tests inside the repo": {"hidden_tests": "./repo/tests"},
             "hidden tests containing the repo": {"hidden_tests": "."},
@@ -186,18 +224,151 @@ class AgentRegistryTests(unittest.TestCase):
 
 
 class AgentCommandTests(unittest.TestCase):
-    def test_commands_pass_workspace_and_prompt_to_each_cli(self) -> None:
-        cases: dict[str, tuple[BaseAgent, list[str]]] = {
-            "claude": (ClaudeAgent(), ["claude", "-p", "Fix", "--allowedTools", "Edit,Write,Bash"]),
-            "codex": (CodexAgent(), ["codex", "exec", "--sandbox", "workspace-write", "-C", "/tmp/ws", "-"]),
-            "copilot": (CopilotAgent(), ["copilot", "-p", "Fix", "--allow-all-tools"]),
-            "opencode": (OpenCodeAgent(), ["opencode", "run", "--dir", "/tmp/ws", "Fix"]),
+    def test_commands_map_workspace_prompt_and_pinned_settings_to_each_cli(self) -> None:
+        workspace = Path("/tmp/ws")
+        claude = ["claude", "-p", "Fix", "--allowedTools", "Edit,Write,Bash"]
+        copilot = ["copilot", "-p", "Fix", "--allow-all-tools"]
+        cases: dict[str, tuple[BaseAgent, list[str], list[str]]] = {
+            "claude": (ClaudeAgent(), claude, [*claude, "--model", "m", "--effort", "high"]),
+            "codex": (
+                CodexAgent(),
+                ["codex", "exec", "--sandbox", "workspace-write", "-C", "/tmp/ws", "-"],
+                ["codex", "exec", "--sandbox", "workspace-write", "--model", "m",
+                 "-c", 'model_reasoning_effort="high"', "-C", "/tmp/ws", "-"],
+            ),
+            "copilot": (CopilotAgent(), copilot, [*copilot, "--model", "m", "--effort", "high"]),
+            "opencode": (
+                OpenCodeAgent(),
+                ["opencode", "run", "--dir", "/tmp/ws", "Fix"],
+                ["opencode", "run", "--dir", "/tmp/ws", "--model", "m", "--variant", "high", "Fix"],
+            ),
         }
 
-        for name, (agent, expected) in cases.items():
+        for name, (agent, unpinned, pinned) in cases.items():
             with self.subTest(name):
-                self.assertEqual(agent.build_command("Fix", Path("/tmp/ws")), expected)
+                self.assertEqual(agent.build_command("Fix", workspace), unpinned)
+                self.assertEqual(agent.with_settings("m", "high").build_command("Fix", workspace), pinned)
+                self.assertIsNone(agent.model)
         self.assertTrue(CodexAgent.prompt_via_stdin)
+
+
+class RunObservationTests(TempDirTestCase):
+    def test_codex_reads_settings_from_the_exec_header_of_successful_runs(self) -> None:
+        stderr = (
+            "OpenAI Codex v0.154.0\n--------\nworkdir: /tmp/ws\nmodel: gpt-5.6-luna\nprovider: openai\n"
+            "reasoning effort: high\n--------\nuser\nmodel: not-part-of-the-header\n"
+        )
+        succeeded = replace(empty_result(), stderr=stderr)
+
+        self.assertEqual(
+            CodexAgent().observe_run(self.root, 0.0, succeeded),
+            RunObservation(models=["gpt-5.6-luna"], efforts=["high"]),
+        )
+        self.assertEqual(CodexAgent().observe_run(self.root, 0.0, replace(succeeded, exit_code=1)), RunObservation())
+
+    def test_claude_reads_settings_from_transcripts_written_since_run_start(self) -> None:
+        workspace = self.root / "runs" / "task" / "claude" / "run-1"
+        workspace.mkdir(parents=True)
+        project_dir = self.root / "config" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve()))
+        project_dir.mkdir(parents=True)
+        earlier = write_jsonl(
+            project_dir / "earlier.jsonl", [{"effort": "xhigh", "message": {"model": "claude-opus-5"}}]
+        )
+        os.utime(earlier, (1000, 1000))
+        write_jsonl(
+            project_dir / "current.jsonl",
+            [
+                {"type": "user", "effort": "high", "message": {"role": "user"}},
+                {"type": "assistant", "effort": "high", "message": {"model": "claude-sonnet-5"}},
+                {"type": "assistant", "effort": "high", "message": {"model": "<synthetic>"}},
+            ],
+        )
+
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.root / "config")}):
+            observed = ClaudeAgent().observe_run(workspace, 2000.0, empty_result())
+
+        self.assertEqual(observed, RunObservation(models=["claude-sonnet-5"], efforts=["high"]))
+
+    def test_copilot_reads_settings_from_session_events_for_the_workspace(self) -> None:
+        workspace = self.root / "ws"
+        workspace.mkdir()
+        for session, cwd, model in [("a", workspace, "claude-sonnet-5"), ("b", self.root / "other", "gpt-5.6-luna")]:
+            session_dir = self.root / "home" / "session-state" / session
+            session_dir.mkdir(parents=True)
+            (session_dir / "workspace.yaml").write_text(f"id: {session}\ncwd: {cwd.resolve()}\n")
+            write_jsonl(
+                session_dir / "events.jsonl",
+                [
+                    {"type": "session.model_change", "data": {"newModel": model, "reasoningEffort": "high"}},
+                    {"type": "assistant.message", "data": {"model": model}},
+                ],
+            )
+
+        with mock.patch.dict(os.environ, {"COPILOT_HOME": str(self.root / "home")}):
+            observed = CopilotAgent().observe_run(workspace, 0.0, empty_result())
+
+        self.assertEqual(observed, RunObservation(models=["claude-sonnet-5"], efforts=["high"]))
+
+    def test_opencode_reads_settings_and_errors_from_sessions_created_since_run_start(self) -> None:
+        workspace = self.root / "ws"
+        workspace.mkdir()
+        database = self.root / "data" / "opencode" / "opencode.db"
+        database.parent.mkdir(parents=True)
+        rejected = {"name": "APIError", "data": {"message": "The requested model is not supported."}}
+        messages = [
+            ("earlier", 1001, {"role": "assistant", "providerID": "deepseek", "modelID": "deepseek-v4-pro"}),
+            ("current", 5001, {"role": "user", "model": {"modelID": "requested-only", "variant": "low"}}),
+            ("current", 5002, {"role": "assistant", "providerID": "github-copilot", "modelID": "claude-sonnet-5",
+                               "variant": "high"}),
+            ("current", 5003, {"role": "assistant", "providerID": "github-copilot", "modelID": "gpt-5.6-luna",
+                               "variant": "xhigh", "error": rejected}),
+        ]
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            "create table session (id text, directory text, time_created integer);"
+            "create table message (session_id text, time_created integer, data text);"
+        )
+        connection.executemany(
+            "insert into session values (?, ?, ?)",
+            [("earlier", str(workspace.resolve()), 1000), ("current", str(workspace.resolve()), 5000)],
+        )
+        connection.executemany(
+            "insert into message values (?, ?, ?)",
+            [(session, created, json.dumps(data)) for session, created, data in messages],
+        )
+        connection.commit()
+        connection.close()
+
+        with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(self.root / "data")}):
+            observed = OpenCodeAgent().observe_run(workspace, 4.0, empty_result())
+
+        self.assertEqual(
+            observed,
+            RunObservation(
+                models=["github-copilot/claude-sonnet-5"],
+                efforts=["high"],
+                errors=["The requested model is not supported."],
+            ),
+        )
+
+
+class SettingsCheckTests(unittest.TestCase):
+    def test_check_settings_compares_pinned_values_with_observed(self) -> None:
+        pinned = AgentSpec(id="a", agent="claude", model="claude-sonnet-5", effort="high")
+        auto = AgentSpec(id="a", agent="copilot", model="auto")
+        cases = [
+            (AgentSpec(id="a", agent="claude"), RunObservation(models=["claude-opus-5"]), "not_pinned"),
+            (pinned, RunObservation(models=["claude-sonnet-5"], efforts=["high"]), "verified"),
+            (pinned, RunObservation(models=["claude-sonnet-5", "claude-haiku-4-5"], efforts=["high"]), "mismatch"),
+            (pinned, RunObservation(models=["claude-sonnet-5"], efforts=["xhigh"]), "mismatch"),
+            (pinned, RunObservation(models=["claude-sonnet-5"]), "unverified"),
+            (auto, RunObservation(models=["mai-code-1.1-flash"]), "not_pinned"),
+            (replace(auto, effort="high"), RunObservation(models=["mai-code-1.1-flash"], efforts=["high"]), "verified"),
+        ]
+
+        for spec, observed, expected in cases:
+            with self.subTest(expected=expected, observed=observed):
+                self.assertEqual(check_settings(spec, observed), expected)
 
 
 class BaseAgentTests(TempDirTestCase):
@@ -369,6 +540,7 @@ class RunnerTests(TempDirTestCase):
         report, payload = self.run_task(task_file, {"fake": FakeAgent()})
 
         expected = {
+            "id": "fake",
             "agent": "fake",
             "run": 1,
             "status": "success",
@@ -376,6 +548,8 @@ class RunnerTests(TempDirTestCase):
             "tests_passed": True,
             "agent_stdout": "fake stdout",
             "test_stdout": "done\n",
+            "settings_check": "not_pinned",
+            "agent_errors": [],
         }
         result = payload["results"][0]
         self.assertEqual({key: result[key] for key in expected}, expected)
@@ -457,9 +631,43 @@ class RunnerTests(TempDirTestCase):
         )
         self.assertTrue((self.root / "runs" / "repeat-task" / "flaky" / "run-3" / "fix.patch").exists())
         summary = payload["agents"][0]
-        self.assertEqual((summary["agent"], summary["runs"], summary["successful_runs"]), ("flaky", 3, 2))
+        self.assertEqual((summary["id"], summary["runs"], summary["successful_runs"]), ("flaky", 3, 2))
         self.assertEqual(summary["pass_at_k"], {"1": 0.667, "2": 1.0, "3": 1.0})
         self.assertEqual(summary["status_counts"], {"success": 2, "validation_failed": 1})
+
+    def test_agent_entries_pin_settings_and_report_what_was_observed(self) -> None:
+        task_file = self.write_task(
+            name="pinned-task",
+            agents=[
+                {"id": "pin-a", "agent": "pinnable", "model": "model-a"},
+                {"id": "pin-b", "agent": "pinnable", "model": "model-b", "effort": "high"},
+            ],
+        )
+
+        _, payload = self.run_task(task_file, {"pinnable": PinnableAgent()})
+
+        results = {result["id"]: result for result in payload["results"]}
+        self.assertEqual(
+            (results["pin-a"]["agent"], results["pin-a"]["agent_stdout"], results["pin-a"]["observed_model"]),
+            ("pinnable", "model-a None", "model-a"),
+        )
+        self.assertEqual(results["pin-a"]["settings_check"], "verified")
+        self.assertEqual(
+            (results["pin-b"]["effort"], results["pin-b"]["observed_effort"], results["pin-b"]["settings_check"]),
+            ("high", None, "unverified"),
+        )
+        self.assertTrue((self.root / "runs" / "pinned-task" / "pin-b" / "run-1" / "fix.patch").exists())
+        self.assertEqual([summary["id"] for summary in payload["agents"]], ["pin-a", "pin-b"])
+        self.assertEqual(payload["agents"][1]["settings_checks"], {"unverified": 1})
+
+    def test_errors_recorded_by_the_cli_mark_the_run_as_agent_failed(self) -> None:
+        task_file = self.write_task(agents=["silent"])
+
+        _, payload = self.run_task(task_file, {"silent": SilentlyFailingAgent()})
+
+        result = payload["results"][0]
+        self.assertEqual((result["agent_exit_code"], result["status"]), (0, "agent_failed"))
+        self.assertEqual(result["agent_errors"], ["The requested model is not supported."])
 
 
 class ReportTests(unittest.TestCase):
@@ -505,6 +713,15 @@ class CliTests(TempDirTestCase):
         ):
             exit_code = main(["run", str(task_file)])
         return exit_code, stdout.getvalue(), stderr.getvalue()
+
+
+def empty_result() -> CommandResult:
+    return CommandResult(command="", exit_code=0, passed=True, stdout="", stderr="", duration_seconds=0.0)
+
+
+def write_jsonl(path: Path, entries: list[dict[str, object]]) -> Path:
+    path.write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
+    return path
 
 
 def wait_for_exit(pid: int, timeout: float = 5.0) -> bool:

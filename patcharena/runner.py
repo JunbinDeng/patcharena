@@ -4,16 +4,30 @@ from __future__ import annotations
 
 import shutil
 import threading
+import time
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import TypeVar
 
 from patcharena.agents import get_agent_registry
 from patcharena.agents.base import BaseAgent
-from patcharena.models import AgentRunResult, BenchmarkReport, CommandResult, PatchStats, Status, TaskConfig
+from patcharena.models import (
+    AgentRunResult,
+    AgentSpec,
+    BenchmarkReport,
+    CommandResult,
+    PatchStats,
+    RunObservation,
+    Status,
+    TaskConfig,
+)
 from patcharena.patch import extract_patch
 from patcharena.process import kill_running_processes, run_command
 from patcharena.report import build_report, write_report
 from patcharena.workspace import PreparedWorkspace, WorkspaceManager, has_uncommitted_changes
+
+T = TypeVar("T")
 
 
 def run_task_file(
@@ -26,7 +40,7 @@ def run_task_file(
     runs_root = Path("runs") if runs_root is None else Path(runs_root)
     registry = agent_registry or get_agent_registry()
 
-    missing_agents = [name for name in task.agents if name not in registry]
+    missing_agents = [spec.agent for spec in task.agents if spec.agent not in registry]
     if missing_agents:
         names = ", ".join(missing_agents)
         supported = ", ".join(sorted(registry))
@@ -43,7 +57,7 @@ def run_task_file(
     run_dir.mkdir(parents=True)
     source_has_uncommitted_changes = has_uncommitted_changes(task.repo_path)
 
-    results_by_agent: dict[str, list[AgentRunResult]] = {}
+    results_by_id: dict[str, list[AgentRunResult]] = {}
     cancelled = threading.Event()
     executor = ThreadPoolExecutor(max_workers=max(1, len(task.agents)))
     try:
@@ -51,15 +65,15 @@ def run_task_file(
             executor.submit(
                 _run_agent_repeatedly,
                 task,
-                agent_name,
-                registry[agent_name],
+                spec,
+                registry[spec.agent].with_settings(spec.model, spec.effort),
                 workspace_manager,
                 cancelled,
-            ): agent_name
-            for agent_name in task.agents
+            ): spec.id
+            for spec in task.agents
         }
         for future in as_completed(futures):
-            results_by_agent[futures[future]] = future.result()
+            results_by_id[futures[future]] = future.result()
     except BaseException:
         # Agent processes run in their own process groups, so Ctrl+C never reaches them.
         cancelled.set()
@@ -68,7 +82,7 @@ def run_task_file(
     finally:
         executor.shutdown(cancel_futures=True)
 
-    results = [result for agent_name in task.agents for result in results_by_agent[agent_name]]
+    results = [result for spec in task.agents for result in results_by_id[spec.id]]
     report = build_report(task, run_dir, results, source_has_uncommitted_changes)
     write_report(report, run_dir / "benchmark_report.json")
     return report
@@ -76,8 +90,8 @@ def run_task_file(
 
 def _run_agent_repeatedly(
     task: TaskConfig,
-    agent_name: str,
-    agent: BaseAgent,
+    spec: AgentSpec,
+    adapter: BaseAgent,
     workspace_manager: WorkspaceManager,
     cancelled: threading.Event,
 ) -> list[AgentRunResult]:
@@ -86,23 +100,28 @@ def _run_agent_repeatedly(
     for run_index in range(1, task.repeat + 1):
         if cancelled.is_set():
             break
-        results.append(_run_agent_benchmark(task, agent_name, agent, run_index, workspace_manager, cancelled))
+        results.append(_run_agent_benchmark(task, spec, adapter, run_index, workspace_manager, cancelled))
     return results
 
 
 def _run_agent_benchmark(
     task: TaskConfig,
-    agent_name: str,
-    agent: BaseAgent,
+    spec: AgentSpec,
+    adapter: BaseAgent,
     run_index: int,
     workspace_manager: WorkspaceManager,
     cancelled: threading.Event,
 ) -> AgentRunResult:
     workspace = None
     try:
-        workspace = workspace_manager.prepare(task, agent_name, run_index)
-        workspace.excluded_patch_paths.extend(agent.setup_workspace(workspace.path))
-        agent_result = agent.run(task.prompt, workspace.path, timeout=task.agent_timeout)
+        workspace = workspace_manager.prepare(task, spec.id, run_index)
+        workspace.excluded_patch_paths.extend(adapter.setup_workspace(workspace.path))
+        started_at = time.time()
+        agent_result = adapter.run(task.prompt, workspace.path, timeout=task.agent_timeout)
+        observed = _best_effort(
+            lambda: adapter.observe_run(workspace.path, started_at, agent_result),
+            RunObservation(),
+        )
 
         # Extract the patch before validation so build and test artifacts stay out of it.
         patch_stats = extract_patch(
@@ -129,19 +148,29 @@ def _run_agent_benchmark(
             test_result = run_validation(task.test_command, workspace.path, task.validation_timeout)
 
         return AgentRunResult(
-            agent=agent_name,
+            spec=spec,
             run=run_index,
             runtime_seconds=agent_result.duration_seconds,
             patch_stats=patch_stats,
             compile_result=compile_result,
             test_result=test_result,
             agent_result=agent_result,
-            status=determine_status(agent_result, compile_result, test_result),
+            status=determine_status(agent_result, compile_result, test_result, observed.errors),
+            observed=observed,
             workspace=workspace.path,
             patch_file=workspace.patch_file,
         )
     except Exception as exc:
-        return error_result(task, agent_name, run_index, workspace_manager, workspace, str(exc))
+        return error_result(task, spec, run_index, workspace_manager, workspace, str(exc))
+
+
+def _best_effort(read: Callable[[], T], fallback: T) -> T:
+    try:
+        return read()
+    except Exception:
+        # Observers read other tools' internal files; if their format changes, report nothing
+        # rather than failing the run.
+        return fallback
 
 
 def _raise_if_cancelled(cancelled: threading.Event) -> None:
@@ -165,10 +194,11 @@ def determine_status(
     agent_result: CommandResult,
     compile_result: CommandResult,
     test_result: CommandResult,
+    agent_errors: Sequence[str],
 ) -> Status:
     if agent_result.exit_code is None:
         return "error"
-    if agent_result.exit_code != 0:
+    if agent_result.exit_code != 0 or agent_errors:
         return "agent_failed"
     if compile_result.passed and test_result.passed:
         return "success"
@@ -177,22 +207,22 @@ def determine_status(
 
 def error_result(
     task: TaskConfig,
-    agent_name: str,
+    spec: AgentSpec,
     run_index: int,
     workspace_manager: WorkspaceManager,
     workspace: PreparedWorkspace | None,
     message: str,
 ) -> AgentRunResult:
     if workspace is None:
-        workspace_path = workspace_manager.workspace_dir(task.name, agent_name, run_index)
-        patch_file = workspace_manager.patch_path(task.name, agent_name, run_index)
+        workspace_path = workspace_manager.workspace_dir(task.name, spec.id, run_index)
+        patch_file = workspace_manager.patch_path(task.name, spec.id, run_index)
     else:
         workspace_path = workspace.path
         patch_file = workspace.patch_file
 
     skipped = CommandResult.failed(f"validation skipped: {message}")
     return AgentRunResult(
-        agent=agent_name,
+        spec=spec,
         run=run_index,
         runtime_seconds=0.0,
         patch_stats=PatchStats(),
@@ -200,6 +230,7 @@ def error_result(
         test_result=skipped,
         agent_result=CommandResult.failed(message),
         status="error",
+        observed=RunObservation(),
         workspace=workspace_path,
         patch_file=patch_file,
     )
