@@ -17,9 +17,9 @@ def build_report(
     results: list[AgentRunResult],
     source_has_uncommitted_changes: bool,
 ) -> BenchmarkReport:
-    results_by_agent: dict[str, list[AgentRunResult]] = {}
+    results_by_id: dict[str, list[AgentRunResult]] = {}
     for result in results:
-        results_by_agent.setdefault(result.agent, []).append(result)
+        results_by_id.setdefault(result.spec.id, []).append(result)
     return BenchmarkReport(
         task_name=task.name,
         source_repo=task.repo_path,
@@ -27,7 +27,7 @@ def build_report(
         repeat=task.repeat,
         hidden_tests=task.hidden_tests,
         source_has_uncommitted_changes=source_has_uncommitted_changes,
-        agents=[_summarize_agent(agent_results) for agent_results in results_by_agent.values()],
+        agents=[_summarize_agent(agent_results) for agent_results in results_by_id.values()],
         results=results,
     )
 
@@ -54,11 +54,12 @@ def _summarize_agent(results: list[AgentRunResult]) -> AgentSummary:
     runs = len(results)
     successes = sum(1 for result in results if result.status == "success")
     return AgentSummary(
-        agent=results[0].agent,
+        spec=results[0].spec,
         runs=runs,
         successful_runs=successes,
         pass_at_k={k: pass_at_k(runs, successes, k) for k in range(1, runs + 1)},
         status_counts=dict(Counter(result.status for result in results)),
+        settings_checks=dict(Counter(result.settings_check for result in results)),
         mean_runtime_seconds=fmean(result.runtime_seconds for result in results),
         mean_patch_lines=fmean(result.patch_stats.patch_lines for result in results),
     )

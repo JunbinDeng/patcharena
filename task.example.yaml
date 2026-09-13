@@ -8,6 +8,7 @@ agent_timeout: 1800
 validation_timeout: 600
 repeat: 1
 # hidden_tests: ./hidden_tests
+# Entries can also pin settings, e.g. {id: claude-sonnet, agent: claude, model: claude-sonnet-5, effort: high}
 agents:
   - codex
   - claude

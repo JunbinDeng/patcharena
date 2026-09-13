@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -13,8 +13,30 @@ DEFAULT_AGENT_TIMEOUT: int = 1800
 DEFAULT_VALIDATION_TIMEOUT: int = 600
 DEFAULT_REPEAT: int = 1
 DEFAULT_AGENTS: list[str] = ["codex", "claude"]
+# A model value that asks the CLI to choose; the chosen model is reported but cannot be verified.
+AUTO_MODEL = "auto"
 
 Status = Literal["success", "validation_failed", "agent_failed", "error"]
+SettingsCheck = Literal["verified", "mismatch", "unverified", "not_pinned"]
+
+_AGENT_FIELDS = frozenset({"id", "agent", "model", "effort"})
+
+
+@dataclass(slots=True, frozen=True)
+class AgentSpec:
+    """One entry of a task's ``agents`` list."""
+
+    id: str
+    agent: str
+    model: str | None = None
+    effort: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def _default_agent_specs() -> list[AgentSpec]:
+    return [AgentSpec(id=name, agent=name) for name in DEFAULT_AGENTS]
 
 
 @dataclass(slots=True)
@@ -26,7 +48,7 @@ class TaskConfig:
     prompt: str
     compile_command: str = ""
     test_command: str = ""
-    agents: list[str] = field(default_factory=lambda: list(DEFAULT_AGENTS))
+    agents: list[AgentSpec] = field(default_factory=_default_agent_specs)
     agent_timeout: int = DEFAULT_AGENT_TIMEOUT
     validation_timeout: int = DEFAULT_VALIDATION_TIMEOUT
     repeat: int = DEFAULT_REPEAT
@@ -115,10 +137,40 @@ class PatchStats:
 
 
 @dataclass(slots=True)
-class AgentRunResult:
-    """Benchmark result for one run of one agent."""
+class RunObservation:
+    """What an agent CLI recorded about a run: the models and effort levels it used, and its errors."""
 
-    agent: str
+    models: list[str] = field(default_factory=list)
+    efforts: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+def check_settings(spec: AgentSpec, observed: RunObservation) -> SettingsCheck:
+    """Compare the pinned model and effort of ``spec`` with what the agent CLI recorded.
+
+    Returns "not_pinned" when neither is pinned, "mismatch" when the CLI recorded anything other than
+    exactly the pinned value, "unverified" when it recorded nothing for a pinned setting, else "verified".
+    """
+    model = None if spec.model == AUTO_MODEL else spec.model
+    pinned = [
+        (value, seen)
+        for value, seen in ((model, observed.models), (spec.effort, observed.efforts))
+        if value is not None
+    ]
+    if not pinned:
+        return "not_pinned"
+    if any(seen and seen != [value] for value, seen in pinned):
+        return "mismatch"
+    if any(not seen for _, seen in pinned):
+        return "unverified"
+    return "verified"
+
+
+@dataclass(slots=True)
+class AgentRunResult:
+    """Benchmark result for one run of one agent entry."""
+
+    spec: AgentSpec
     run: int
     runtime_seconds: float
     patch_stats: PatchStats
@@ -126,12 +178,17 @@ class AgentRunResult:
     test_result: CommandResult
     agent_result: CommandResult
     status: Status
+    observed: RunObservation
     workspace: Path
     patch_file: Path
 
+    @property
+    def settings_check(self) -> SettingsCheck:
+        return check_settings(self.spec, self.observed)
+
     def to_dict(self) -> dict[str, object]:
         return {
-            "agent": self.agent,
+            **self.spec.to_dict(),
             "run": self.run,
             "runtime_seconds": round(self.runtime_seconds, 3),
             "patch_lines": self.patch_stats.patch_lines,
@@ -141,10 +198,14 @@ class AgentRunResult:
             "tests_passed": self.test_result.passed,
             "compile_passed": self.compile_result.passed,
             "status": self.status,
+            "observed_model": ", ".join(self.observed.models) or None,
+            "observed_effort": ", ".join(self.observed.efforts) or None,
+            "settings_check": self.settings_check,
             "agent_exit_code": self.agent_result.exit_code,
             "agent_command": self.agent_result.command,
             "agent_stdout": self.agent_result.stdout,
             "agent_stderr": self.agent_result.stderr,
+            "agent_errors": list(self.observed.errors),
             "compile_exit_code": self.compile_result.exit_code,
             "compile_command": self.compile_result.command,
             "compile_stdout": self.compile_result.stdout,
@@ -160,23 +221,25 @@ class AgentRunResult:
 
 @dataclass(slots=True)
 class AgentSummary:
-    """Aggregate over all runs of one agent."""
+    """Aggregate over all runs of one agent entry."""
 
-    agent: str
+    spec: AgentSpec
     runs: int
     successful_runs: int
     pass_at_k: dict[int, float]
     status_counts: dict[str, int]
+    settings_checks: dict[str, int]
     mean_runtime_seconds: float
     mean_patch_lines: float
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "agent": self.agent,
+            **self.spec.to_dict(),
             "runs": self.runs,
             "successful_runs": self.successful_runs,
             "pass_at_k": {str(k): round(value, 3) for k, value in self.pass_at_k.items()},
             "status_counts": dict(self.status_counts),
+            "settings_checks": dict(self.settings_checks),
             "mean_runtime_seconds": round(self.mean_runtime_seconds, 3),
             "mean_patch_lines": round(self.mean_patch_lines, 3),
         }
@@ -255,18 +318,31 @@ def _check_hidden_tests(hidden_tests: Path, repo_path: Path) -> None:
         raise ValueError(f"hidden_tests must not overlap repo_path, or agents could read them: {hidden_tests}")
 
 
-def _agent_list(value: object) -> list[str]:
+def _agent_list(value: object) -> list[AgentSpec]:
     if value is None:
-        return list(DEFAULT_AGENTS)
+        return _default_agent_specs()
     if not isinstance(value, list) or not value:
-        raise ValueError("'agents' must be a non-empty list of strings")
-
-    agents: list[str] = []
-    for item in value:
-        if not isinstance(item, str) or not item.strip():
-            raise ValueError("'agents' must contain only non-empty strings")
-        agents.append(item.strip())
-    duplicates = sorted(name for name, count in Counter(agents).items() if count > 1)
+        raise ValueError("'agents' must be a non-empty list")
+    specs = [_agent_spec(item) for item in value]
+    duplicates = sorted(agent_id for agent_id, count in Counter(spec.id for spec in specs).items() if count > 1)
     if duplicates:
-        raise ValueError(f"duplicate agents in task: {', '.join(duplicates)}")
-    return agents
+        raise ValueError(f"duplicate agent ids in task: {', '.join(duplicates)}")
+    return specs
+
+
+def _agent_spec(item: object) -> AgentSpec:
+    if isinstance(item, str) and item.strip():
+        return AgentSpec(id=item.strip(), agent=item.strip())
+    if not isinstance(item, dict):
+        raise ValueError("each 'agents' entry must be an agent name or a mapping with an 'agent' key")
+    unknown = sorted(str(key) for key in item if key not in _AGENT_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown fields in 'agents' entry: {', '.join(unknown)}")
+    agent = _require_string(item, "agent")
+    agent_id = _optional_string(item.get("id"), field="id") or agent
+    return AgentSpec(
+        id=_require_path_component(agent_id, "agent 'id'"),
+        agent=agent,
+        model=_optional_string(item.get("model"), field="model") or None,
+        effort=_optional_string(item.get("effort"), field="effort") or None,
+    )
