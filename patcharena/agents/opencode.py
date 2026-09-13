@@ -8,7 +8,6 @@ from patcharena.agents.base import BaseAgent
 
 
 class OpenCodeAgent(BaseAgent):
-    name = "opencode"
     binary_name = "opencode"
 
     def build_command(self, prompt: str, workspace: Path) -> list[str]:

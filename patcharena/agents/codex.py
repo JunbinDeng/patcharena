@@ -8,9 +8,10 @@ from patcharena.agents.base import BaseAgent
 
 
 class CodexAgent(BaseAgent):
-    name = "codex"
     binary_name = "codex"
     prompt_via_stdin = True
 
     def build_command(self, prompt: str, workspace: Path) -> list[str]:
-        return ["codex", "exec", "--full-auto", "-C", str(workspace), "-"]
+        # `--full-auto` was removed in codex-cli 0.154; `--sandbox workspace-write` is the part of it
+        # that matters for non-interactive runs and is accepted by older versions too.
+        return ["codex", "exec", "--sandbox", "workspace-write", "-C", str(workspace), "-"]

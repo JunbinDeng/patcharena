@@ -5,6 +5,7 @@ prompt: |
 compile_command: ""
 test_command: pytest
 agent_timeout: 1800
+validation_timeout: 600
 agents:
   - codex
   - claude

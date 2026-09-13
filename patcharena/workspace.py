@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import shutil
 import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 from string import Template
 
 from patcharena.git_env import git_environment
@@ -23,7 +24,7 @@ class PreparedWorkspace:
 
 
 class WorkspaceManager:
-    """Creates isolated git workspaces for each agent run."""
+    """Creates a separate git workspace for each agent run."""
 
     def __init__(self, runs_root: Path, templates_dir: Path | None = None) -> None:
         self.runs_root = Path(runs_root)
@@ -46,13 +47,18 @@ class WorkspaceManager:
     def prepare(self, task: TaskConfig, agent_name: str) -> PreparedWorkspace:
         source = self.validate_source(task.repo_path)
         workspace = self.workspace_dir(task.name, agent_name)
-        self.run_dir(task.name).mkdir(parents=True, exist_ok=True)
+        workspace.parent.mkdir(parents=True, exist_ok=True)
         _remove_path(workspace)
 
-        if _is_git_repo(source):
+        toplevel = _committed_toplevel(source)
+        if toplevel == source:
             _git_clone(source, workspace)
         else:
-            _copy_and_init(source, workspace)
+            if toplevel is None:
+                shutil.copytree(source, workspace)
+            else:
+                _export_committed_subdirectory(toplevel, source, workspace)
+            _commit_snapshot(workspace)
 
         excluded_paths = ["PATCHARENA_TASK.md"]
         self.task_path(task.name, agent_name).write_text(
@@ -96,46 +102,78 @@ class WorkspaceManager:
         return (self.templates_dir / template_name).read_text(encoding="utf-8")
 
 
-def _is_git_repo(path: Path) -> bool:
-    result = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
-        capture_output=True,
-        check=False,
-        env=git_environment(),
-    )
-    return result.returncode == 0
+def has_uncommitted_changes(source_path: Path) -> bool:
+    """Return whether a git-backed source has changes its workspaces will not contain."""
+    source = Path(source_path).resolve()
+    if not source.is_dir() or _committed_toplevel(source) is None:
+        return False
+    status = _git(["status", "--porcelain", "--", "."], cwd=source)
+    return status.returncode == 0 and bool(status.stdout.strip())
+
+
+def _committed_toplevel(source: Path) -> Path | None:
+    """Return the git toplevel when ``source`` is a repository root or a committed directory inside one."""
+    result = _git(["rev-parse", "--show-toplevel"], cwd=source)
+    if result.returncode != 0:
+        return None
+    toplevel = Path(result.stdout.strip()).resolve()
+    if toplevel == source or _git(["cat-file", "-e", _head_tree(toplevel, source)], cwd=toplevel).returncode == 0:
+        return toplevel
+    return None
+
+
+def _head_tree(toplevel: Path, directory: Path) -> str:
+    return f"HEAD:{directory.relative_to(toplevel).as_posix()}"
 
 
 def _git_clone(source: Path, workspace: Path) -> None:
-    result = subprocess.run(
-        ["git", "clone", str(source), str(workspace)],
+    _check_git(["clone", str(source), str(workspace.resolve())])
+
+
+def _export_committed_subdirectory(toplevel: Path, directory: Path, workspace: Path) -> None:
+    """Check out the committed contents of ``directory`` without the rest of the repository."""
+    workspace.mkdir(parents=True)
+    with tempfile.TemporaryDirectory() as index_dir:
+        # A throwaway index keeps the source repository's own index untouched.
+        env = git_environment()
+        env["GIT_INDEX_FILE"] = str(Path(index_dir) / "index")
+        _check_git(["read-tree", _head_tree(toplevel, directory)], cwd=toplevel, env=env)
+        _check_git(["checkout-index", "--all", f"--prefix={workspace.resolve()}/"], cwd=toplevel, env=env)
+
+
+def _commit_snapshot(workspace: Path) -> None:
+    for args in [
+        ["init"],
+        ["add", "-A"],
+        ["-c", "user.name=PatchArena", "-c", "user.email=patcharena@example.com",
+         "commit", "--allow-empty", "-m", "patcharena: initial snapshot"],
+    ]:
+        _check_git(args, cwd=workspace)
+
+
+def _git(
+    args: list[str],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
         text=True,
         capture_output=True,
         check=False,
-        env=git_environment(),
+        env=git_environment() if env is None else env,
     )
+
+
+def _check_git(
+    args: list[str],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
+    result = _git(args, cwd=cwd, env=env)
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "git clone failed")
-
-
-def _copy_and_init(source: Path, workspace: Path) -> None:
-    shutil.copytree(source, workspace)
-    for command in [
-        ["git", "init"],
-        ["git", "add", "-A"],
-        ["git", "-c", "user.name=PatchArena", "-c", "user.email=patcharena@example.com",
-         "commit", "--allow-empty", "-m", "patcharena: initial snapshot"],
-    ]:
-        result = subprocess.run(
-            command,
-            cwd=workspace,
-            text=True,
-            capture_output=True,
-            check=False,
-            env=git_environment(),
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or f"git {command[1]} failed")
+        raise RuntimeError(result.stderr.strip() or f"git {args[0]} failed")
 
 
 def _remove_path(path: Path) -> None:
