@@ -2,34 +2,17 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from patcharena.agents.base import BaseAgent
 
 
 class ClaudeAgent(BaseAgent):
-    name = "claude"
     binary_name = "claude"
-
-    def setup_workspace(self, workspace: Path) -> list[str]:
-        claude_dir = workspace / ".claude"
-        claude_dir.mkdir(exist_ok=True)
-        settings = {
-            "permissions": {
-                "allow": [
-                    "Edit(*)",
-                    "Write(*)",
-                    "Bash(*)",
-                ]
-            }
-        }
-        (claude_dir / "settings.json").write_text(
-            json.dumps(settings, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        return [".claude/settings.json"]
 
     def build_command(self, prompt: str, workspace: Path) -> list[str]:
         del workspace
-        return ["claude", "-p", prompt]
+        # Grant tools on the command line: Claude Code ignores permissions in a project's
+        # .claude/settings.json until the trust dialog is accepted for that directory,
+        # and every benchmark workspace is a new directory.
+        return ["claude", "-p", prompt, "--allowedTools", "Edit,Write,Bash"]

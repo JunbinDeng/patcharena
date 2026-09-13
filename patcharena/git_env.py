@@ -11,12 +11,6 @@ _GIT_CONFIG_OVERRIDES = (
 )
 
 
-def configure_process_git_environment() -> None:
-    """Apply stable git config overrides to the current process environment."""
-
-    _apply_git_config_overrides(os.environ)
-
-
 def git_environment() -> dict[str, str]:
     """Return an environment mapping with PatchArena git overrides applied."""
 

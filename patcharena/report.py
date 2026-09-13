@@ -8,11 +8,17 @@ from pathlib import Path
 from patcharena.models import AgentRunResult, BenchmarkReport, TaskConfig
 
 
-def build_report(task: TaskConfig, run_dir: Path, results: list[AgentRunResult]) -> BenchmarkReport:
+def build_report(
+    task: TaskConfig,
+    run_dir: Path,
+    results: list[AgentRunResult],
+    source_has_uncommitted_changes: bool,
+) -> BenchmarkReport:
     return BenchmarkReport(
         task_name=task.name,
         source_repo=task.repo_path,
         run_dir=run_dir,
+        source_has_uncommitted_changes=source_has_uncommitted_changes,
         results=results,
         summary=_build_summary(results),
     )

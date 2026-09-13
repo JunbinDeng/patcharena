@@ -1,300 +1,232 @@
 from __future__ import annotations
 
+import contextlib
+import functools
+import io
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
+from pathlib import Path
+from typing import Any
 from unittest import mock
 
+import yaml
+
+from patcharena import process
 from patcharena.agents import get_agent_registry
 from patcharena.agents.base import BaseAgent
+from patcharena.agents.claude import ClaudeAgent
+from patcharena.agents.codex import CodexAgent
+from patcharena.agents.copilot import CopilotAgent
+from patcharena.agents.opencode import OpenCodeAgent
 from patcharena.cli import main
 from patcharena.models import (
-    CommandResult,
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_AGENTS,
+    DEFAULT_VALIDATION_TIMEOUT,
+    BenchmarkReport,
+    CommandResult,
     TaskConfig,
 )
 from patcharena.patch import extract_patch
 from patcharena.result_parser import parse_shortstat
-from patcharena.runner import run_task_file
-from patcharena.workspace import WorkspaceManager
+from patcharena.runner import run_task_file, run_validation
+from patcharena.workspace import PreparedWorkspace, WorkspaceManager
 
 
 class FakeAgent(BaseAgent):
-    name = "fake"
-    binary_name = "fake"
+    """Writes hello.txt and succeeds, without running a CLI."""
 
-    def is_available(self) -> bool:
-        return True
-
-    def build_command(self, prompt: str, workspace: Path) -> list[str]:
-        return ["fake"]
-
-    def run(self, task_prompt: str, workspace: Path, timeout: int | None = None) -> CommandResult:
-        target = workspace / "hello.txt"
-        target.write_text("done\n", encoding="utf-8")
+    def run(self, task_prompt: str, workspace: Path, timeout: float | None = None) -> CommandResult:
+        (workspace / "hello.txt").write_text("done\n", encoding="utf-8")
         return CommandResult(
-            command="fake",
-            exit_code=0,
-            passed=True,
-            stdout="fake stdout",
-            stderr="",
-            duration_seconds=0.01,
+            command="fake", exit_code=0, passed=True, stdout="fake stdout", stderr="", duration_seconds=0.01
         )
 
 
-class AlwaysAvailableAgent(BaseAgent):
-    """Agent that always reports as available and delegates to BaseAgent.run."""
+class TimedOutAgent(FakeAgent):
+    def run(self, task_prompt: str, workspace: Path, timeout: float | None = None) -> CommandResult:
+        return CommandResult.failed("Agent timed out after 1 seconds", command="timedout", duration_seconds=1.0)
 
-    name = "always"
-    binary_name = "always"
 
-    def is_available(self) -> bool:
-        return True
+class ShellAgent(BaseAgent):
+    """Runs a shell script through BaseAgent.run."""
+
+    binary_name = "sh"
+
+    def __init__(self, script: str) -> None:
+        self.script = script
 
     def build_command(self, prompt: str, workspace: Path) -> list[str]:
-        return ["always", prompt]
+        return ["sh", "-c", self.script]
 
 
 class RelativePathAgent(BaseAgent):
-    name = "relative"
     binary_name = "path-check"
 
     def build_command(self, prompt: str, workspace: Path) -> list[str]:
         return ["path-check", str(workspace)]
 
 
-class TaskConfigTests(unittest.TestCase):
-    def test_from_file_rejects_name_with_path_separator(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            for bad_name in ["../escape", "task/subtask", ".."]:
-                task_file = root / "task.yaml"
-                task_file.write_text(
-                    f"name: {bad_name!r}\nrepo_path: ./repo\nprompt: test\n",
-                    encoding="utf-8",
-                )
-                with self.assertRaises(ValueError, msg=f"name {bad_name!r} should be rejected"):
-                    TaskConfig.from_file(task_file)
+class TempDirTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
+    @functools.cached_property
+    def source_repo(self) -> Path:
+        return create_git_repo(self.root / "source")
+
+    def write_task(self, file_name: str = "task.yaml", **fields: object) -> Path:
+        """Write a task file; repo_path defaults to a fresh git repository."""
+        task = {"name": "task", "prompt": "Test", **fields}
+        task.setdefault("repo_path", str(self.source_repo))
+        path = self.root / file_name
+        path.write_text(yaml.safe_dump(task, sort_keys=False), encoding="utf-8")
+        return path
+
+    def run_task(
+        self,
+        task_file: Path,
+        agents: dict[str, BaseAgent],
+        overwrite: bool = False,
+    ) -> tuple[BenchmarkReport, dict[str, Any]]:
+        report = run_task_file(task_file, runs_root=self.root / "runs", agent_registry=agents, overwrite=overwrite)
+        payload = json.loads((report.run_dir / "benchmark_report.json").read_text(encoding="utf-8"))
+        return report, payload
+
+    def prepare_workspace(self, source: Path, agent: str = "codex") -> PreparedWorkspace:
+        task = TaskConfig(name="workspace-task", repo_path=source, prompt="Make a change")
+        return WorkspaceManager(self.root / "runs").prepare(task, agent)
+
+
+class TaskConfigTests(TempDirTestCase):
     def test_from_file_applies_defaults(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            task_file = root / "task.yaml"
-            task_file.write_text(
-                "\n".join(
-                    [
-                        "name: sample-task",
-                        "repo_path: ./repo",
-                        "prompt: Fix the bug",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+        config = TaskConfig.from_file(self.write_task(repo_path="./repo"))
 
-            config = TaskConfig.from_file(task_file)
+        self.assertEqual((config.name, config.prompt), ("task", "Test"))
+        self.assertEqual(config.repo_path, (self.root / "repo").resolve())
+        self.assertEqual((config.compile_command, config.test_command), ("", ""))
+        self.assertEqual(config.agents, DEFAULT_AGENTS)
+        self.assertEqual(
+            (config.agent_timeout, config.validation_timeout),
+            (DEFAULT_AGENT_TIMEOUT, DEFAULT_VALIDATION_TIMEOUT),
+        )
 
-            self.assertEqual(config.name, "sample-task")
-            self.assertEqual(config.repo_path, (root / "repo").resolve())
-            self.assertEqual(config.prompt, "Fix the bug")
-            self.assertEqual(config.compile_command, "")
-            self.assertEqual(config.test_command, "")
-            self.assertEqual(config.agents, DEFAULT_AGENTS)
+    def test_from_file_loads_optional_fields(self) -> None:
+        task_file = self.write_task(
+            repo_path="./repo",
+            agent_timeout=120,
+            validation_timeout=90,
+            agents=["codex", "copilot"],
+        )
 
-    def test_constants_are_exported(self) -> None:
-        self.assertIsInstance(DEFAULT_AGENT_TIMEOUT, int)
-        self.assertGreater(DEFAULT_AGENT_TIMEOUT, 0)
-        self.assertIsInstance(DEFAULT_AGENTS, list)
-        self.assertTrue(all(isinstance(a, str) for a in DEFAULT_AGENTS))
+        config = TaskConfig.from_file(task_file)
 
-    def test_direct_constructor_and_from_file_share_defaults(self) -> None:
-        """Both code paths must use the same default values."""
-        # Direct constructor
-        direct = TaskConfig(name="t", repo_path=Path("."), prompt="p")
-        self.assertEqual(direct.agent_timeout, DEFAULT_AGENT_TIMEOUT)
-        self.assertEqual(direct.agents, DEFAULT_AGENTS)
+        self.assertEqual((config.agent_timeout, config.validation_timeout), (120, 90))
+        self.assertEqual(config.agents, ["codex", "copilot"])
 
-        # from_file() with no optional fields
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            task_file = root / "task.yaml"
-            task_file.write_text(
-                "name: t\nrepo_path: ./repo\nprompt: p\n",
-                encoding="utf-8",
-            )
-            loaded = TaskConfig.from_file(task_file)
-        self.assertEqual(loaded.agent_timeout, DEFAULT_AGENT_TIMEOUT)
-        self.assertEqual(loaded.agents, DEFAULT_AGENTS)
+    def test_from_file_rejects_invalid_values(self) -> None:
+        cases: dict[str, dict[str, object]] = {
+            "name with a separator": {"name": "../escape"},
+            "boolean timeout": {"agent_timeout": True},
+            "agent entry of the wrong type": {"agents": [42]},
+            "duplicate agents": {"agents": ["codex", "codex"]},
+        }
 
-    def test_from_file_accepts_all_supported_agents(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            task_file = root / "task.yaml"
-            task_file.write_text(
-                "\n".join(
-                    [
-                        "name: sample-task",
-                        "repo_path: ./repo",
-                        "prompt: Fix the bug",
-                        "agents:",
-                        "  - codex",
-                        "  - claude",
-                        "  - opencode",
-                        "  - copilot",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+        for case, fields in cases.items():
+            with self.subTest(case):
+                task_file = self.write_task(**{"repo_path": "./repo", **fields})
 
-            config = TaskConfig.from_file(task_file)
-
-            self.assertEqual(
-                config.agents,
-                ["codex", "claude", "opencode", "copilot"],
-            )
+                with self.assertRaises(ValueError):
+                    TaskConfig.from_file(task_file)
 
 
 class AgentRegistryTests(unittest.TestCase):
     def test_registry_includes_all_supported_agents(self) -> None:
-        registry = get_agent_registry()
-
-        self.assertEqual(
-            sorted(registry),
-            ["claude", "codex", "copilot", "opencode"],
-        )
+        self.assertEqual(sorted(get_agent_registry()), ["claude", "codex", "copilot", "opencode"])
 
 
-class BaseAgentTests(unittest.TestCase):
+class AgentCommandTests(unittest.TestCase):
+    def test_commands_pass_workspace_and_prompt_to_each_cli(self) -> None:
+        cases: dict[str, tuple[BaseAgent, list[str]]] = {
+            "claude": (ClaudeAgent(), ["claude", "-p", "Fix", "--allowedTools", "Edit,Write,Bash"]),
+            "codex": (CodexAgent(), ["codex", "exec", "--sandbox", "workspace-write", "-C", "/tmp/ws", "-"]),
+            "copilot": (CopilotAgent(), ["copilot", "-p", "Fix", "--allow-all-tools"]),
+            "opencode": (OpenCodeAgent(), ["opencode", "run", "--dir", "/tmp/ws", "Fix"]),
+        }
+
+        for name, (agent, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(agent.build_command("Fix", Path("/tmp/ws")), expected)
+        self.assertTrue(CodexAgent.prompt_via_stdin)
+
+
+class BaseAgentTests(TempDirTestCase):
     def test_run_resolves_relative_workspace_before_building_command(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            workspace = root / "runs" / "task" / "agent"
-            workspace.mkdir(parents=True)
+        (self.root / "runs" / "task" / "agent").mkdir(parents=True)
+        script = self.root / "path-check"
+        script.write_text('#!/bin/sh\nif [ -d "$1" ]; then\n  exit 0\nfi\nexit 1\n', encoding="utf-8")
+        script.chmod(0o755)
 
-            script = root / "path-check"
-            script.write_text(
-                "\n".join(
-                    [
-                        "#!/bin/sh",
-                        'if [ -d "$1" ]; then',
-                        "  exit 0",
-                        "fi",
-                        "exit 1",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            script.chmod(0o755)
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(self.root)
+            with mock.patch.dict(os.environ, {"PATH": f"{self.root}{os.pathsep}{os.environ.get('PATH', '')}"}):
+                result = RelativePathAgent().run("ignored", Path("runs/task/agent"))
+        finally:
+            os.chdir(previous_cwd)
 
-            previous_cwd = Path.cwd()
-            try:
-                os.chdir(root)
-                with mock.patch.dict(
-                    os.environ,
-                    {"PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}"},
-                ):
-                    result = RelativePathAgent().run("ignored", Path("runs/task/agent"))
-            finally:
-                os.chdir(previous_cwd)
+        self.assertEqual(result.exit_code, 0)
 
-            self.assertEqual(result.exit_code, 0)
-            self.assertTrue(result.passed)
+    def test_run_disables_gpg_signing_for_agent_git_commands(self) -> None:
+        result = ShellAgent("git config --get commit.gpgsign").run("ignored", self.root)
 
+        self.assertEqual(result.stdout.strip(), "false")
 
-class AgentTimeoutTests(unittest.TestCase):
-    def test_timeout_reason_propagated_to_compile_and_test_stderr(self) -> None:
-        """Agent returning exit_code=None should thread its stderr into compile/test stderr."""
+    def test_run_does_not_wait_for_background_processes_after_exit(self) -> None:
+        started_at = time.monotonic()
+        result = ShellAgent("sleep 30 & echo done").run("ignored", self.root, timeout=8)
 
-        class TimedOutAgent(BaseAgent):
-            name = "timedout"
-            binary_name = "timedout"
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("done", result.stdout)
+        self.assertLess(time.monotonic() - started_at, 5)
 
-            def is_available(self) -> bool:
-                return True
+    def test_timeouts_keep_partial_output(self) -> None:
+        results = {
+            "agent": ShellAgent("echo partial; sleep 30").run("ignored", self.root, timeout=0.3),
+            "validation": run_validation("echo partial; sleep 30", self.root, timeout=0.3),
+        }
 
-            def build_command(self, prompt: str, workspace: Path) -> list[str]:
-                return ["timedout"]
+        for caller, result in results.items():
+            with self.subTest(caller):
+                self.assertIsNone(result.exit_code)
+                self.assertFalse(result.passed)
+                self.assertIn("timed out", result.stderr.lower())
+                self.assertIn("partial", result.stdout)
 
-            def run(self, task_prompt: str, workspace: Path, timeout: int | None = None) -> CommandResult:
-                del task_prompt, timeout
-                return CommandResult(
-                    command="timedout",
-                    exit_code=None,
-                    passed=False,
-                    stdout="",
-                    stderr="Agent timed out after 1 seconds",
-                    duration_seconds=1.0,
-                )
+    def test_timeout_kills_background_processes(self) -> None:
+        ShellAgent("sleep 30 & echo $! > child.pid; wait").run("ignored", self.root, timeout=0.3)
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source_repo = create_git_repo(root / "source")
-            task_file = root / "task.yaml"
-            task_file.write_text(
-                "\n".join(
-                    [
-                        "name: timeout-propagation-task",
-                        f"repo_path: {source_repo}",
-                        "prompt: Test",
-                        "agents:",
-                        "  - timedout",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+        child_pid = int((self.root / "child.pid").read_text(encoding="utf-8"))
+        self.assertTrue(wait_for_exit(child_pid), "background process survived the timeout")
 
-            report = run_task_file(
-                task_file,
-                runs_root=root / "runs",
-                agent_registry={"timedout": TimedOutAgent()},
-            )
+    def test_kill_running_processes_stops_active_commands(self) -> None:
+        outcomes: list[subprocess.CompletedProcess[str]] = []
+        thread = threading.Thread(target=lambda: outcomes.append(process.run_process(["sleep", "30"], self.root)))
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not process._running and time.monotonic() < deadline:
+            time.sleep(0.01)
 
-            result = report.results[0]
-            self.assertEqual(result.status, "error")
-            self.assertIn("timed out", result.compile_result.stderr.lower())
-            self.assertIn("timed out", result.test_result.stderr.lower())
+        process.kill_running_processes()
+        thread.join(timeout=5)
 
-    def test_run_returns_error_result_on_timeout(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            workspace = Path(temp_dir)
-
-            with mock.patch(
-                "patcharena.agents.base.subprocess.run",
-                side_effect=subprocess.TimeoutExpired("fake", 1),
-            ):
-                result = AlwaysAvailableAgent().run("ignored", workspace, timeout=1)
-
-            self.assertIsNone(result.exit_code)
-            self.assertFalse(result.passed)
-            self.assertIn("timed out", result.stderr.lower())
-
-    def test_task_config_loads_agent_timeout(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            task_file = root / "task.yaml"
-            task_file.write_text(
-                "\n".join(
-                    [
-                        "name: timeout-task",
-                        "repo_path: ./repo",
-                        "prompt: Test",
-                        "agent_timeout: 120",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            config = TaskConfig.from_file(task_file)
-
-            self.assertEqual(config.agent_timeout, 120)
+        self.assertFalse(thread.is_alive())
+        self.assertNotEqual(outcomes[0].returncode, 0)
 
 
 class ResultParserTests(unittest.TestCase):
@@ -309,265 +241,202 @@ class ResultParserTests(unittest.TestCase):
         for shortstat, expected in cases:
             with self.subTest(shortstat=shortstat):
                 stats = parse_shortstat(shortstat)
-                self.assertEqual(
-                    (stats.files_changed, stats.insertions, stats.deletions),
-                    expected,
-                )
+                self.assertEqual((stats.files_changed, stats.insertions, stats.deletions), expected)
 
 
-class WorkspaceTests(unittest.TestCase):
-    def test_prepare_appends_patcharena_content_when_agents_md_exists(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source_repo = create_git_repo(root / "source")
-            (source_repo / "AGENTS.md").write_text("# Project rules\n- Keep it simple\n", encoding="utf-8")
-            commit_file(source_repo, "AGENTS.md")
-            manager = WorkspaceManager(root / "runs")
-            task = TaskConfig(name="agents-test", repo_path=source_repo, prompt="Make a change")
-
-            prepared = manager.prepare(task, "codex")
-
-            agents_content = (prepared.path / "AGENTS.md").read_text(encoding="utf-8")
-            self.assertIn("Keep it simple", agents_content)
-            self.assertIn("PatchArena Workspace", agents_content)
-            self.assertIn("AGENTS.md", prepared.excluded_patch_paths)
-
-    def test_prepare_works_with_plain_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source_dir = root / "source"
-            source_dir.mkdir()
-            (source_dir / "main.py").write_text("print('hello')\n", encoding="utf-8")
-
-            manager = WorkspaceManager(root / "runs")
-            task = TaskConfig(name="plain-dir-task", repo_path=source_dir, prompt="Make a change")
-
-            prepared = manager.prepare(task, "codex")
-
-            self.assertTrue((prepared.path / ".git").exists())
-            self.assertTrue((prepared.path / "main.py").exists())
-
+class WorkspaceTests(TempDirTestCase):
     def test_prepare_clones_repo_and_writes_task_file(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source_repo = create_git_repo(root / "source")
-            manager = WorkspaceManager(root / "runs")
-            task = TaskConfig(name="task-one", repo_path=source_repo, prompt="Make a change")
+        prepared = self.prepare_workspace(self.source_repo)
 
-            prepared = manager.prepare(task, "codex")
+        self.assertTrue((prepared.path / ".git").exists())
+        self.assertIn("Make a change", prepared.task_file.read_text(encoding="utf-8"))
+        self.assertTrue((prepared.path / "AGENTS.md").exists())
+        self.assertEqual(prepared.excluded_patch_paths, ["PATCHARENA_TASK.md", "AGENTS.md"])
 
-            self.assertTrue((prepared.path / ".git").exists())
-            self.assertTrue(prepared.task_file.exists())
-            self.assertTrue((prepared.path / "AGENTS.md").exists())
-            self.assertIn("PATCHARENA_TASK.md", prepared.excluded_patch_paths)
-            self.assertIn("AGENTS.md", prepared.excluded_patch_paths)
-            self.assertIn("Make a change", prepared.task_file.read_text(encoding="utf-8"))
+    def test_prepare_appends_patcharena_content_when_agents_md_exists(self) -> None:
+        (self.source_repo / "AGENTS.md").write_text("# Project rules\n- Keep it simple\n", encoding="utf-8")
+        commit_file(self.source_repo, "AGENTS.md")
+
+        agents_content = (self.prepare_workspace(self.source_repo).path / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertIn("Keep it simple", agents_content)
+        self.assertIn("PatchArena Workspace", agents_content)
+
+    def test_prepare_copies_plain_directory(self) -> None:
+        source = self.root / "plain"
+        source.mkdir()
+        (source / "main.py").write_text("print('hello')\n", encoding="utf-8")
+
+        prepared = self.prepare_workspace(source)
+
+        self.assertTrue((prepared.path / ".git").exists())
+        self.assertTrue((prepared.path / "main.py").exists())
+
+    def test_prepare_exports_committed_subdirectory_of_git_repo(self) -> None:
+        package = self.source_repo / "pkg"
+        package.mkdir()
+        (package / "module.py").write_text("x = 1\n", encoding="utf-8")
+        commit_file(self.source_repo, "pkg")
+        (package / "scratch.txt").write_text("not committed\n", encoding="utf-8")
+
+        prepared = self.prepare_workspace(package)
+
+        self.assertTrue((prepared.path / ".git").exists())
+        self.assertEqual((prepared.path / "module.py").read_text(encoding="utf-8"), "x = 1\n")
+        self.assertFalse((prepared.path / "scratch.txt").exists())
+        self.assertFalse((prepared.path / "README.md").exists())
+
+    def test_prepare_copies_untracked_directory_inside_git_repo(self) -> None:
+        scratch = self.source_repo / "scratch"
+        scratch.mkdir()
+        (scratch / "notes.txt").write_text("draft\n", encoding="utf-8")
+
+        prepared = self.prepare_workspace(scratch)
+
+        self.assertTrue((prepared.path / ".git").exists())
+        self.assertTrue((prepared.path / "notes.txt").exists())
 
 
-class PatchTests(unittest.TestCase):
-    def test_extract_patch_handles_non_utf8_file_content(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source_repo = create_git_repo(root / "source")
-            manager = WorkspaceManager(root / "runs")
-            task = TaskConfig(name="binary-test", repo_path=source_repo, prompt="Add latin-1 file")
-            prepared = manager.prepare(task, "codex")
-
-            # Write a file with latin-1 bytes that are invalid UTF-8 (no null, so git treats as text)
-            (prepared.path / "latin1.txt").write_bytes(b"caf\xe9\n")
-
-            stats = extract_patch(
-                prepared.path,
-                prepared.patch_file,
-                excluded_paths=prepared.excluded_patch_paths,
-            )
-
-            self.assertGreater(stats.files_changed, 0)
-
+class PatchTests(TempDirTestCase):
     def test_extract_patch_writes_fix_patch_and_counts_changes(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source_repo = create_git_repo(root / "source")
-            manager = WorkspaceManager(root / "runs")
-            task = TaskConfig(name="task-two", repo_path=source_repo, prompt="Update files")
-            prepared = manager.prepare(task, "codex")
+        prepared = self.prepare_workspace(self.source_repo)
+        (prepared.path / "README.md").write_text("hello\nupdated\n", encoding="utf-8")
+        (prepared.path / "new_file.txt").write_text("brand new\n", encoding="utf-8")
 
-            tracked_file = prepared.path / "README.md"
-            tracked_file.write_text("hello\nupdated\n", encoding="utf-8")
-            (prepared.path / "new_file.txt").write_text("brand new\n", encoding="utf-8")
+        stats = extract_patch(prepared.path, prepared.patch_file, excluded_paths=prepared.excluded_patch_paths)
 
-            stats = extract_patch(
-                prepared.path,
-                prepared.patch_file,
-                excluded_paths=prepared.excluded_patch_paths,
+        patch_text = prepared.patch_file.read_text(encoding="utf-8")
+        self.assertGreater(stats.patch_lines, 0)
+        self.assertEqual(stats.files_changed, 2)
+        self.assertIn("new_file.txt", patch_text)
+        self.assertNotIn("PATCHARENA_TASK.md", patch_text)
+
+    def test_extract_patch_preserves_non_utf8_file_content(self) -> None:
+        prepared = self.prepare_workspace(self.source_repo)
+        # Latin-1 bytes that are invalid UTF-8 (no null, so git treats the file as text).
+        (prepared.path / "latin1.txt").write_bytes(b"caf\xe9\n")
+
+        extract_patch(prepared.path, prepared.patch_file, excluded_paths=prepared.excluded_patch_paths)
+
+        fresh = self.prepare_workspace(self.source_repo, agent="fresh")
+        run(["git", "apply", str(prepared.patch_file)], fresh.path)
+        self.assertEqual((fresh.path / "latin1.txt").read_bytes(), b"caf\xe9\n")
+
+
+class RunnerTests(TempDirTestCase):
+    def test_run_task_file_writes_report_with_patch_and_validation_output(self) -> None:
+        task_file = self.write_task(
+            compile_command="test -f hello.txt && echo built > build.out",
+            test_command="grep done hello.txt",
+            agents=["fake"],
+        )
+
+        report, payload = self.run_task(task_file, {"fake": FakeAgent()})
+
+        expected = {
+            "agent": "fake",
+            "status": "success",
+            "compile_passed": True,
+            "tests_passed": True,
+            "agent_stdout": "fake stdout",
+            "test_stdout": "done\n",
+        }
+        result = payload["results"][0]
+        self.assertEqual({key: result[key] for key in expected}, expected)
+        self.assertEqual(payload["summary"]["successful_agents"], 1)
+        patch_text = report.results[0].patch_file.read_text(encoding="utf-8")
+        self.assertIn("hello.txt", patch_text)
+        self.assertNotIn("build.out", patch_text)
+
+    def test_failed_runs_propagate_the_reason_to_skipped_validation(self) -> None:
+        cases = {
+            "missing repository": (
+                self.write_task("missing.yaml", name="missing", repo_path=str(self.root / "missing"), agents=["agent"]),
+                FakeAgent(),
+                "does not exist",
+            ),
+            "timed out agent": (
+                self.write_task("timed-out.yaml", name="timed-out", agents=["agent"]),
+                TimedOutAgent(),
+                "timed out",
+            ),
+        }
+
+        for case, (task_file, agent, reason) in cases.items():
+            with self.subTest(case):
+                report, _ = self.run_task(task_file, {"agent": agent})
+
+                result = report.results[0]
+                self.assertEqual(result.status, "error")
+                for command_result in (result.agent_result, result.compile_result, result.test_result):
+                    self.assertIn(reason, command_result.stderr.lower())
+
+    def test_reruns_require_overwrite_and_record_uncommitted_source_changes(self) -> None:
+        task_file = self.write_task(agents=["fake"])
+        report, _ = self.run_task(task_file, {"fake": FakeAgent()})
+        self.assertFalse(report.source_has_uncommitted_changes)
+
+        with self.assertRaises(FileExistsError):
+            self.run_task(task_file, {"fake": FakeAgent()})
+
+        (self.source_repo / "README.md").write_text("edited\n", encoding="utf-8")
+        report, payload = self.run_task(task_file, {"fake": FakeAgent()}, overwrite=True)
+        self.assertEqual(report.results[0].status, "success")
+        self.assertTrue(payload["source_has_uncommitted_changes"])
+
+
+class CliTests(TempDirTestCase):
+    def test_exit_codes(self) -> None:
+        cases: dict[str, tuple[dict[str, object], int]] = {
+            "every agent succeeds": ({"test_command": "true", "agents": ["fake"]}, 0),
+            "an agent fails validation": ({"test_command": "false", "agents": ["fake"]}, 1),
+            "invalid task file": ({"prompt": ""}, 2),
+        }
+
+        for index, (case, (fields, expected)) in enumerate(cases.items()):
+            with self.subTest(case):
+                task_file = self.write_task(f"cli-{index}.yaml", name=f"cli-{index}", **fields)
+
+                exit_code, stdout, stderr = self.run_cli(task_file)
+
+                self.assertEqual(exit_code, expected)
+                if expected == 2:
+                    self.assertIn("prompt", stderr)
+                else:
+                    self.assertIn("benchmark_report.json", stdout)
+
+    def run_cli(self, task_file: Path) -> tuple[int, str, str]:
+        def run_in_temp(task_path: Path, **kwargs: Any) -> BenchmarkReport:
+            return run_task_file(
+                task_path, runs_root=self.root / "runs", agent_registry={"fake": FakeAgent()}, **kwargs
             )
 
-            patch_text = prepared.patch_file.read_text(encoding="utf-8")
-            self.assertGreater(stats.patch_lines, 0)
-            self.assertEqual(stats.files_changed, 2)
-            self.assertIn("new_file.txt", patch_text)
-            self.assertNotIn("PATCHARENA_TASK.md", patch_text)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("patcharena.cli.run_task_file", side_effect=run_in_temp),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            exit_code = main(["run", str(task_file)])
+        return exit_code, stdout.getvalue(), stderr.getvalue()
 
 
-class RunnerTests(unittest.TestCase):
-    def test_error_result_propagates_reason_to_compile_and_test_stderr(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            task_file = root / "task.yaml"
-            task_file.write_text(
-                "\n".join(
-                    [
-                        "name: error-task",
-                        f"repo_path: {root / 'does_not_exist'}",
-                        "prompt: Test",
-                        "agents:",
-                        "  - fake",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            report = run_task_file(
-                task_file,
-                runs_root=root / "runs",
-                agent_registry={"fake": FakeAgent()},
-            )
-
-            result = report.results[0]
-            self.assertEqual(result.status, "error")
-            self.assertIn("does not exist", result.agent_result.stderr)
-            self.assertIn("does not exist", result.compile_result.stderr)
-            self.assertIn("does not exist", result.test_result.stderr)
-
-    def test_run_task_file_rejects_duplicate_agents(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source_repo = create_git_repo(root / "source")
-            task_file = root / "task.yaml"
-            task_file.write_text(
-                "\n".join(
-                    [
-                        "name: dup-task",
-                        f"repo_path: {source_repo}",
-                        "prompt: Test",
-                        "agents:",
-                        "  - fake",
-                        "  - fake",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            with self.assertRaises(ValueError, msg="duplicate agent names should raise ValueError"):
-                run_task_file(
-                    task_file,
-                    runs_root=root / "runs",
-                    agent_registry={"fake": FakeAgent()},
-                )
-
-    def test_run_task_file_writes_json_report_with_fake_agent(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source_repo = create_git_repo(root / "source")
-            task_file = root / "task.yaml"
-            task_file.write_text(
-                "\n".join(
-                    [
-                        "name: report-task",
-                        f"repo_path: {source_repo}",
-                        "prompt: Add hello.txt",
-                        "compile_command: test -f hello.txt",
-                        "test_command: grep -q done hello.txt",
-                        "agents:",
-                        "  - fake",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            report = run_task_file(
-                task_file,
-                runs_root=root / "runs",
-                agent_registry={"fake": FakeAgent()},
-            )
-
-            report_path = report.run_dir / "benchmark_report.json"
-            payload = json.loads(report_path.read_text(encoding="utf-8"))
-
-            self.assertEqual(report.results[0].status, "success")
-            self.assertTrue(report.results[0].compile_result.passed)
-            self.assertTrue(report.results[0].test_result.passed)
-            self.assertTrue(report.results[0].patch_file.exists())
-            self.assertEqual(payload["results"][0]["agent"], "fake")
-            self.assertEqual(payload["results"][0]["agent_command"], "fake")
-            self.assertEqual(payload["results"][0]["agent_stdout"], "fake stdout")
-            self.assertEqual(payload["results"][0]["agent_stderr"], "")
-            self.assertEqual(payload["results"][0]["compile_stderr"], "")
-            self.assertEqual(payload["results"][0]["test_stderr"], "")
-            self.assertEqual(payload["summary"]["successful_agents"], 1)
-
-
-class CliTests(unittest.TestCase):
-    def test_cli_entrypoint_runs_task(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source_repo = create_git_repo(root / "source")
-            task_file = root / "task.yaml"
-            task_file.write_text(
-                "\n".join(
-                    [
-                        "name: cli-task",
-                        f"repo_path: {source_repo}",
-                        "prompt: Add hello.txt",
-                        "compile_command: test -f hello.txt",
-                        "test_command: grep -q done hello.txt",
-                        "agents:",
-                        "  - fake",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            def run_in_temp(task_path: Path):
-                return run_task_file(
-                    task_path,
-                    runs_root=root / "runs",
-                    agent_registry={"fake": FakeAgent()},
-                )
-
-            with mock.patch("patcharena.cli.run_task_file", side_effect=run_in_temp):
-                exit_code = main(["run", str(task_file)])
-
-            self.assertEqual(exit_code, 0)
-            self.assertTrue((root / "runs" / "cli-task" / "benchmark_report.json").exists())
+def wait_for_exit(pid: int, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def create_git_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     run(["git", "init"], path)
     (path / "README.md").write_text("hello\n", encoding="utf-8")
-    run(["git", "add", "README.md"], path)
-    run(
-        [
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "tag.gpgsign=false",
-            "-c",
-            "user.name=PatchArena",
-            "-c",
-            "user.email=patcharena@example.com",
-            "commit",
-            "-m",
-            "Initial commit",
-        ],
-        path,
-    )
+    commit_file(path, "README.md", "Initial commit")
     return path
 
 
@@ -582,13 +451,7 @@ def commit_file(repo: Path, filename: str, message: str = "Add file") -> None:
 
 
 def run(command: list[str], cwd: Path) -> None:
-    completed = subprocess.run(
-        command,
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    completed = subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=False)
     if completed.returncode != 0:
         raise AssertionError(completed.stderr)
 

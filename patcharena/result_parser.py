@@ -3,24 +3,20 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 from patcharena.models import CommandResult, PatchStats
 
 
 def command_result_from_run(
-    command: list[str] | str,
+    command: Sequence[str] | str,
     exit_code: int | None,
     stdout: str,
     stderr: str,
     duration_seconds: float,
 ) -> CommandResult:
-    if isinstance(command, list):
-        command_text = " ".join(command)
-    else:
-        command_text = command
-
     return CommandResult(
-        command=command_text,
+        command=command if isinstance(command, str) else " ".join(command),
         exit_code=exit_code,
         passed=exit_code == 0,
         stdout=stdout,
