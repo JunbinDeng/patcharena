@@ -35,18 +35,18 @@ class WorkspaceManager:
     def run_dir(self, task_name: str) -> Path:
         return self.runs_root / task_name
 
-    def workspace_dir(self, task_name: str, agent_name: str) -> Path:
-        return self.run_dir(task_name) / agent_name
+    def workspace_dir(self, task_name: str, agent_name: str, run_index: int) -> Path:
+        return self.run_dir(task_name) / agent_name / f"run-{run_index}"
 
-    def task_path(self, task_name: str, agent_name: str) -> Path:
-        return self.workspace_dir(task_name, agent_name) / "PATCHARENA_TASK.md"
+    def task_path(self, task_name: str, agent_name: str, run_index: int) -> Path:
+        return self.workspace_dir(task_name, agent_name, run_index) / "PATCHARENA_TASK.md"
 
-    def patch_path(self, task_name: str, agent_name: str) -> Path:
-        return self.workspace_dir(task_name, agent_name) / "fix.patch"
+    def patch_path(self, task_name: str, agent_name: str, run_index: int) -> Path:
+        return self.workspace_dir(task_name, agent_name, run_index) / "fix.patch"
 
-    def prepare(self, task: TaskConfig, agent_name: str) -> PreparedWorkspace:
+    def prepare(self, task: TaskConfig, agent_name: str, run_index: int) -> PreparedWorkspace:
         source = self.validate_source(task.repo_path)
-        workspace = self.workspace_dir(task.name, agent_name)
+        workspace = self.workspace_dir(task.name, agent_name, run_index)
         workspace.parent.mkdir(parents=True, exist_ok=True)
         _remove_path(workspace)
 
@@ -61,7 +61,7 @@ class WorkspaceManager:
             _commit_snapshot(workspace)
 
         excluded_paths = ["PATCHARENA_TASK.md"]
-        self.task_path(task.name, agent_name).write_text(
+        self.task_path(task.name, agent_name, run_index).write_text(
             self.render_task_markdown(task),
             encoding="utf-8",
         )
@@ -77,8 +77,8 @@ class WorkspaceManager:
 
         return PreparedWorkspace(
             path=workspace,
-            task_file=self.task_path(task.name, agent_name),
-            patch_file=self.patch_path(task.name, agent_name),
+            task_file=self.task_path(task.name, agent_name, run_index),
+            patch_file=self.patch_path(task.name, agent_name, run_index),
             excluded_patch_paths=excluded_paths,
         )
 

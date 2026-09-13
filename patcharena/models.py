@@ -11,6 +11,7 @@ import yaml
 
 DEFAULT_AGENT_TIMEOUT: int = 1800
 DEFAULT_VALIDATION_TIMEOUT: int = 600
+DEFAULT_REPEAT: int = 1
 DEFAULT_AGENTS: list[str] = ["codex", "claude"]
 
 Status = Literal["success", "validation_failed", "agent_failed", "error"]
@@ -28,15 +29,24 @@ class TaskConfig:
     agents: list[str] = field(default_factory=lambda: list(DEFAULT_AGENTS))
     agent_timeout: int = DEFAULT_AGENT_TIMEOUT
     validation_timeout: int = DEFAULT_VALIDATION_TIMEOUT
+    repeat: int = DEFAULT_REPEAT
+    hidden_tests: Path | None = None
 
     @classmethod
     def from_file(cls, task_file: Path) -> TaskConfig:
         task_path = Path(task_file).resolve()
         data = yaml.safe_load(task_path.read_text(encoding="utf-8")) or {}
 
+        name = _require_path_component(_require_string(data, "name"), "task 'name'")
+        repo_path = _resolve_path(task_path, _require_string(data, "repo_path"))
+        hidden_tests_value = _optional_string(data.get("hidden_tests"), field="hidden_tests")
+        hidden_tests = _resolve_path(task_path, hidden_tests_value) if hidden_tests_value else None
+        if hidden_tests is not None:
+            _check_hidden_tests(hidden_tests, repo_path)
+
         return cls(
-            name=_require_path_component(_require_string(data, "name"), "task 'name'"),
-            repo_path=_resolve_path(task_path, _require_string(data, "repo_path")),
+            name=name,
+            repo_path=repo_path,
             prompt=_require_string(data, "prompt"),
             compile_command=_optional_string(data.get("compile_command"), field="compile_command"),
             test_command=_optional_string(data.get("test_command"), field="test_command"),
@@ -47,6 +57,8 @@ class TaskConfig:
                 DEFAULT_VALIDATION_TIMEOUT,
                 field="validation_timeout",
             ),
+            repeat=_positive_int(data.get("repeat"), DEFAULT_REPEAT, field="repeat"),
+            hidden_tests=hidden_tests,
         )
 
 
@@ -104,9 +116,10 @@ class PatchStats:
 
 @dataclass(slots=True)
 class AgentRunResult:
-    """Final benchmark result for one agent."""
+    """Benchmark result for one run of one agent."""
 
     agent: str
+    run: int
     runtime_seconds: float
     patch_stats: PatchStats
     compile_result: CommandResult
@@ -119,6 +132,7 @@ class AgentRunResult:
     def to_dict(self) -> dict[str, object]:
         return {
             "agent": self.agent,
+            "run": self.run,
             "runtime_seconds": round(self.runtime_seconds, 3),
             "patch_lines": self.patch_stats.patch_lines,
             "files_changed": self.patch_stats.files_changed,
@@ -145,24 +159,52 @@ class AgentRunResult:
 
 
 @dataclass(slots=True)
+class AgentSummary:
+    """Aggregate over all runs of one agent."""
+
+    agent: str
+    runs: int
+    successful_runs: int
+    pass_at_k: dict[int, float]
+    status_counts: dict[str, int]
+    mean_runtime_seconds: float
+    mean_patch_lines: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "agent": self.agent,
+            "runs": self.runs,
+            "successful_runs": self.successful_runs,
+            "pass_at_k": {str(k): round(value, 3) for k, value in self.pass_at_k.items()},
+            "status_counts": dict(self.status_counts),
+            "mean_runtime_seconds": round(self.mean_runtime_seconds, 3),
+            "mean_patch_lines": round(self.mean_patch_lines, 3),
+        }
+
+
+@dataclass(slots=True)
 class BenchmarkReport:
     """Top-level report written to disk."""
 
     task_name: str
     source_repo: Path
     run_dir: Path
+    repeat: int
+    hidden_tests: Path | None
     source_has_uncommitted_changes: bool
+    agents: list[AgentSummary]
     results: list[AgentRunResult]
-    summary: dict[str, float | int]
 
     def to_dict(self) -> dict[str, object]:
         return {
             "task_name": self.task_name,
             "source_repo": str(self.source_repo),
             "run_dir": str(self.run_dir),
+            "repeat": self.repeat,
+            "hidden_tests": None if self.hidden_tests is None else str(self.hidden_tests),
             "source_has_uncommitted_changes": self.source_has_uncommitted_changes,
+            "agents": [summary.to_dict() for summary in self.agents],
             "results": [result.to_dict() for result in self.results],
-            "summary": dict(self.summary),
         }
 
 
@@ -203,6 +245,14 @@ def _resolve_path(task_path: Path, value: str) -> Path:
     if not path.is_absolute():
         path = (task_path.parent / path).resolve()
     return path
+
+
+def _check_hidden_tests(hidden_tests: Path, repo_path: Path) -> None:
+    if not hidden_tests.is_dir():
+        raise ValueError(f"hidden_tests is not a directory: {hidden_tests}")
+    hidden, repo = hidden_tests.resolve(), repo_path.resolve()
+    if hidden.is_relative_to(repo) or repo.is_relative_to(hidden):
+        raise ValueError(f"hidden_tests must not overlap repo_path, or agents could read them: {hidden_tests}")
 
 
 def _agent_list(value: object) -> list[str]:

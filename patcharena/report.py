@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
+from collections import Counter
 from pathlib import Path
+from statistics import fmean
 
-from patcharena.models import AgentRunResult, BenchmarkReport, TaskConfig
+from patcharena.models import AgentRunResult, AgentSummary, BenchmarkReport, TaskConfig
 
 
 def build_report(
@@ -14,13 +17,18 @@ def build_report(
     results: list[AgentRunResult],
     source_has_uncommitted_changes: bool,
 ) -> BenchmarkReport:
+    results_by_agent: dict[str, list[AgentRunResult]] = {}
+    for result in results:
+        results_by_agent.setdefault(result.agent, []).append(result)
     return BenchmarkReport(
         task_name=task.name,
         source_repo=task.repo_path,
         run_dir=run_dir,
+        repeat=task.repeat,
+        hidden_tests=task.hidden_tests,
         source_has_uncommitted_changes=source_has_uncommitted_changes,
+        agents=[_summarize_agent(agent_results) for agent_results in results_by_agent.values()],
         results=results,
-        summary=_build_summary(results),
     )
 
 
@@ -32,16 +40,25 @@ def write_report(report: BenchmarkReport, output_path: Path) -> None:
     )
 
 
-def _build_summary(results: list[AgentRunResult]) -> dict[str, float | int]:
-    agent_count = len(results)
-    successful_agents = sum(1 for result in results if result.status == "success")
-    total_runtime = sum(result.runtime_seconds for result in results)
-    total_patch_lines = sum(result.patch_stats.patch_lines for result in results)
+def pass_at_k(runs: int, successes: int, k: int) -> float:
+    """Estimate the chance that at least one of ``k`` runs succeeds, from ``runs`` observed runs.
 
-    return {
-        "agent_count": agent_count,
-        "successful_agents": successful_agents,
-        "success_rate": round(successful_agents / agent_count, 3) if agent_count else 0.0,
-        "average_runtime_seconds": round(total_runtime / agent_count, 3) if agent_count else 0.0,
-        "average_patch_lines": round(total_patch_lines / agent_count, 3) if agent_count else 0.0,
-    }
+    Uses the unbiased estimator from "Evaluating Large Language Models Trained on Code" (Chen et al., 2021).
+    """
+    if runs - successes < k:
+        return 1.0
+    return 1.0 - math.comb(runs - successes, k) / math.comb(runs, k)
+
+
+def _summarize_agent(results: list[AgentRunResult]) -> AgentSummary:
+    runs = len(results)
+    successes = sum(1 for result in results if result.status == "success")
+    return AgentSummary(
+        agent=results[0].agent,
+        runs=runs,
+        successful_runs=successes,
+        pass_at_k={k: pass_at_k(runs, successes, k) for k in range(1, runs + 1)},
+        status_counts=dict(Counter(result.status for result in results)),
+        mean_runtime_seconds=fmean(result.runtime_seconds for result in results),
+        mean_patch_lines=fmean(result.patch_stats.patch_lines for result in results),
+    )
