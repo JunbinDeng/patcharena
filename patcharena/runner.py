@@ -43,13 +43,13 @@ def run_task_file(
     run_dir.mkdir(parents=True)
     source_has_uncommitted_changes = has_uncommitted_changes(task.repo_path)
 
-    results_by_agent: dict[str, AgentRunResult] = {}
+    results_by_agent: dict[str, list[AgentRunResult]] = {}
     cancelled = threading.Event()
     executor = ThreadPoolExecutor(max_workers=max(1, len(task.agents)))
     try:
         futures = {
             executor.submit(
-                _run_agent_benchmark,
+                _run_agent_repeatedly,
                 task,
                 agent_name,
                 registry[agent_name],
@@ -68,22 +68,39 @@ def run_task_file(
     finally:
         executor.shutdown(cancel_futures=True)
 
-    results = [results_by_agent[agent_name] for agent_name in task.agents]
+    results = [result for agent_name in task.agents for result in results_by_agent[agent_name]]
     report = build_report(task, run_dir, results, source_has_uncommitted_changes)
     write_report(report, run_dir / "benchmark_report.json")
     return report
+
+
+def _run_agent_repeatedly(
+    task: TaskConfig,
+    agent_name: str,
+    agent: BaseAgent,
+    workspace_manager: WorkspaceManager,
+    cancelled: threading.Event,
+) -> list[AgentRunResult]:
+    # Runs of one agent are sequential, so `repeat` does not multiply the load on the machine or the agent's API.
+    results: list[AgentRunResult] = []
+    for run_index in range(1, task.repeat + 1):
+        if cancelled.is_set():
+            break
+        results.append(_run_agent_benchmark(task, agent_name, agent, run_index, workspace_manager, cancelled))
+    return results
 
 
 def _run_agent_benchmark(
     task: TaskConfig,
     agent_name: str,
     agent: BaseAgent,
+    run_index: int,
     workspace_manager: WorkspaceManager,
     cancelled: threading.Event,
 ) -> AgentRunResult:
     workspace = None
     try:
-        workspace = workspace_manager.prepare(task, agent_name)
+        workspace = workspace_manager.prepare(task, agent_name, run_index)
         workspace.excluded_patch_paths.extend(agent.setup_workspace(workspace.path))
         agent_result = agent.run(task.prompt, workspace.path, timeout=task.agent_timeout)
 
@@ -97,6 +114,15 @@ def _run_agent_benchmark(
         if agent_result.exit_code is None:
             compile_result = test_result = CommandResult.failed(f"validation skipped: {agent_result.stderr}")
         else:
+            if task.hidden_tests is not None:
+                # Copied only after the patch is extracted: the agent never saw these files, and any
+                # same-path file it edited is restored before validation.
+                shutil.copytree(
+                    task.hidden_tests,
+                    workspace.path,
+                    dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(".git"),
+                )
             _raise_if_cancelled(cancelled)
             compile_result = run_validation(task.compile_command, workspace.path, task.validation_timeout)
             _raise_if_cancelled(cancelled)
@@ -104,6 +130,7 @@ def _run_agent_benchmark(
 
         return AgentRunResult(
             agent=agent_name,
+            run=run_index,
             runtime_seconds=agent_result.duration_seconds,
             patch_stats=patch_stats,
             compile_result=compile_result,
@@ -114,7 +141,7 @@ def _run_agent_benchmark(
             patch_file=workspace.patch_file,
         )
     except Exception as exc:
-        return error_result(task, agent_name, workspace_manager, workspace, str(exc))
+        return error_result(task, agent_name, run_index, workspace_manager, workspace, str(exc))
 
 
 def _raise_if_cancelled(cancelled: threading.Event) -> None:
@@ -151,13 +178,14 @@ def determine_status(
 def error_result(
     task: TaskConfig,
     agent_name: str,
+    run_index: int,
     workspace_manager: WorkspaceManager,
     workspace: PreparedWorkspace | None,
     message: str,
 ) -> AgentRunResult:
     if workspace is None:
-        workspace_path = workspace_manager.workspace_dir(task.name, agent_name)
-        patch_file = workspace_manager.patch_path(task.name, agent_name)
+        workspace_path = workspace_manager.workspace_dir(task.name, agent_name, run_index)
+        patch_file = workspace_manager.patch_path(task.name, agent_name, run_index)
     else:
         workspace_path = workspace.path
         patch_file = workspace.patch_file
@@ -165,6 +193,7 @@ def error_result(
     skipped = CommandResult.failed(f"validation skipped: {message}")
     return AgentRunResult(
         agent=agent_name,
+        run=run_index,
         runtime_seconds=0.0,
         patch_stats=PatchStats(),
         compile_result=skipped,

@@ -6,6 +6,8 @@ compile_command: ""
 test_command: pytest
 agent_timeout: 1800
 validation_timeout: 600
+repeat: 1
+# hidden_tests: ./hidden_tests
 agents:
   - codex
   - claude

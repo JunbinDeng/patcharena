@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Exit with 0 when every agent succeeds, 1 when any does not, 2 on invalid input."""
+    """Exit with 0 when every run of every agent succeeds, 1 when any does not, 2 on invalid input."""
     parser = build_parser()
     args = parser.parse_args(argv)
 

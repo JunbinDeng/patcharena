@@ -27,12 +27,14 @@ from patcharena.cli import main
 from patcharena.models import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_AGENTS,
+    DEFAULT_REPEAT,
     DEFAULT_VALIDATION_TIMEOUT,
     BenchmarkReport,
     CommandResult,
     TaskConfig,
 )
 from patcharena.patch import extract_patch
+from patcharena.report import pass_at_k
 from patcharena.result_parser import parse_shortstat
 from patcharena.runner import run_task_file, run_validation
 from patcharena.workspace import PreparedWorkspace, WorkspaceManager
@@ -48,9 +50,33 @@ class FakeAgent(BaseAgent):
         )
 
 
+class FlakyAgent(FakeAgent):
+    """Succeeds on every run except the second."""
+
+    def run(self, task_prompt: str, workspace: Path, timeout: float | None = None) -> CommandResult:
+        result = super().run(task_prompt, workspace, timeout)
+        if workspace.name == "run-2":
+            (workspace / "hello.txt").write_text("wrong\n", encoding="utf-8")
+        return result
+
+
 class TimedOutAgent(FakeAgent):
     def run(self, task_prompt: str, workspace: Path, timeout: float | None = None) -> CommandResult:
         return CommandResult.failed("Agent timed out after 1 seconds", command="timedout", duration_seconds=1.0)
+
+
+class CheatingAgent(FakeAgent):
+    """Writes a wrong answer, then rewrites the visible test so that it passes anyway."""
+
+    def __init__(self) -> None:
+        self.hidden_tests_seen: list[bool] = []
+
+    def run(self, task_prompt: str, workspace: Path, timeout: float | None = None) -> CommandResult:
+        self.hidden_tests_seen.append((workspace / "hidden_check.sh").exists())
+        result = super().run(task_prompt, workspace, timeout)
+        (workspace / "hello.txt").write_text("wrong\n", encoding="utf-8")
+        (workspace / "check.sh").write_text("exit 0\n", encoding="utf-8")
+        return result
 
 
 class ShellAgent(BaseAgent):
@@ -100,7 +126,7 @@ class TempDirTestCase(unittest.TestCase):
 
     def prepare_workspace(self, source: Path, agent: str = "codex") -> PreparedWorkspace:
         task = TaskConfig(name="workspace-task", repo_path=source, prompt="Make a change")
-        return WorkspaceManager(self.root / "runs").prepare(task, agent)
+        return WorkspaceManager(self.root / "runs").prepare(task, agent, 1)
 
 
 class TaskConfigTests(TempDirTestCase):
@@ -112,29 +138,38 @@ class TaskConfigTests(TempDirTestCase):
         self.assertEqual((config.compile_command, config.test_command), ("", ""))
         self.assertEqual(config.agents, DEFAULT_AGENTS)
         self.assertEqual(
-            (config.agent_timeout, config.validation_timeout),
-            (DEFAULT_AGENT_TIMEOUT, DEFAULT_VALIDATION_TIMEOUT),
+            (config.agent_timeout, config.validation_timeout, config.repeat, config.hidden_tests),
+            (DEFAULT_AGENT_TIMEOUT, DEFAULT_VALIDATION_TIMEOUT, DEFAULT_REPEAT, None),
         )
 
     def test_from_file_loads_optional_fields(self) -> None:
+        (self.root / "hidden").mkdir()
         task_file = self.write_task(
             repo_path="./repo",
             agent_timeout=120,
             validation_timeout=90,
+            repeat=3,
+            hidden_tests="./hidden",
             agents=["codex", "copilot"],
         )
 
         config = TaskConfig.from_file(task_file)
 
-        self.assertEqual((config.agent_timeout, config.validation_timeout), (120, 90))
+        self.assertEqual((config.agent_timeout, config.validation_timeout, config.repeat), (120, 90, 3))
+        self.assertEqual(config.hidden_tests, (self.root / "hidden").resolve())
         self.assertEqual(config.agents, ["codex", "copilot"])
 
     def test_from_file_rejects_invalid_values(self) -> None:
+        (self.root / "repo" / "tests").mkdir(parents=True)
         cases: dict[str, dict[str, object]] = {
             "name with a separator": {"name": "../escape"},
             "boolean timeout": {"agent_timeout": True},
+            "zero repeat": {"repeat": 0},
             "agent entry of the wrong type": {"agents": [42]},
             "duplicate agents": {"agents": ["codex", "codex"]},
+            "missing hidden tests": {"hidden_tests": "./missing"},
+            "hidden tests inside the repo": {"hidden_tests": "./repo/tests"},
+            "hidden tests containing the repo": {"hidden_tests": "."},
         }
 
         for case, fields in cases.items():
@@ -335,6 +370,7 @@ class RunnerTests(TempDirTestCase):
 
         expected = {
             "agent": "fake",
+            "run": 1,
             "status": "success",
             "compile_passed": True,
             "tests_passed": True,
@@ -343,7 +379,7 @@ class RunnerTests(TempDirTestCase):
         }
         result = payload["results"][0]
         self.assertEqual({key: result[key] for key in expected}, expected)
-        self.assertEqual(payload["summary"]["successful_agents"], 1)
+        self.assertEqual(payload["agents"][0]["pass_at_k"], {"1": 1.0})
         patch_text = report.results[0].patch_file.read_text(encoding="utf-8")
         self.assertIn("hello.txt", patch_text)
         self.assertNotIn("build.out", patch_text)
@@ -384,12 +420,62 @@ class RunnerTests(TempDirTestCase):
         self.assertEqual(report.results[0].status, "success")
         self.assertTrue(payload["source_has_uncommitted_changes"])
 
+    def test_hidden_tests_replace_agent_edits_before_validation(self) -> None:
+        (self.source_repo / "check.sh").write_text("grep -q done hello.txt\n", encoding="utf-8")
+        commit_file(self.source_repo, "check.sh")
+        hidden = self.root / "hidden"
+        hidden.mkdir()
+        (hidden / "check.sh").write_text("grep -q done hello.txt\n", encoding="utf-8")
+        (hidden / "hidden_check.sh").write_text("test -f hello.txt\n", encoding="utf-8")
+        common: dict[str, object] = {"test_command": "sh check.sh", "agents": ["cheater"]}
+        visible_task = self.write_task("visible.yaml", name="visible-only", **common)
+        hidden_task = self.write_task("hidden.yaml", name="with-hidden", hidden_tests=str(hidden), **common)
+        agent = CheatingAgent()
+
+        visible_report, _ = self.run_task(visible_task, {"cheater": agent})
+        hidden_report, _ = self.run_task(hidden_task, {"cheater": agent})
+
+        self.assertEqual(visible_report.results[0].status, "success")
+        self.assertEqual(hidden_report.results[0].status, "validation_failed")
+        self.assertEqual(agent.hidden_tests_seen, [False, False])
+        patch_text = hidden_report.results[0].patch_file.read_text(encoding="utf-8")
+        self.assertIn("b/check.sh", patch_text)
+        self.assertNotIn("hidden_check.sh", patch_text)
+
+    def test_repeat_runs_each_agent_and_reports_pass_at_k(self) -> None:
+        task_file = self.write_task(
+            name="repeat-task", test_command="grep -q done hello.txt", repeat=3, agents=["flaky"]
+        )
+
+        _, payload = self.run_task(task_file, {"flaky": FlakyAgent()})
+
+        self.assertEqual(payload["repeat"], 3)
+        self.assertEqual([result["run"] for result in payload["results"]], [1, 2, 3])
+        self.assertEqual(
+            [result["status"] for result in payload["results"]],
+            ["success", "validation_failed", "success"],
+        )
+        self.assertTrue((self.root / "runs" / "repeat-task" / "flaky" / "run-3" / "fix.patch").exists())
+        summary = payload["agents"][0]
+        self.assertEqual((summary["agent"], summary["runs"], summary["successful_runs"]), ("flaky", 3, 2))
+        self.assertEqual(summary["pass_at_k"], {"1": 0.667, "2": 1.0, "3": 1.0})
+        self.assertEqual(summary["status_counts"], {"success": 2, "validation_failed": 1})
+
+
+class ReportTests(unittest.TestCase):
+    def test_pass_at_k_uses_unbiased_estimator(self) -> None:
+        cases = [((5, 2, 1), 0.4), ((5, 2, 2), 0.7), ((5, 2, 4), 1.0), ((5, 0, 3), 0.0), ((1, 1, 1), 1.0)]
+
+        for (runs, successes, k), expected in cases:
+            with self.subTest(runs=runs, successes=successes, k=k):
+                self.assertAlmostEqual(pass_at_k(runs, successes, k), expected)
+
 
 class CliTests(TempDirTestCase):
     def test_exit_codes(self) -> None:
         cases: dict[str, tuple[dict[str, object], int]] = {
-            "every agent succeeds": ({"test_command": "true", "agents": ["fake"]}, 0),
-            "an agent fails validation": ({"test_command": "false", "agents": ["fake"]}, 1),
+            "every run succeeds": ({"test_command": "true", "agents": ["fake"]}, 0),
+            "a run fails validation": ({"test_command": "false", "agents": ["fake"]}, 1),
             "invalid task file": ({"prompt": ""}, 2),
         }
 

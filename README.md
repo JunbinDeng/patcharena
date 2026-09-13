@@ -61,8 +61,8 @@ uv run patcharena run task.yaml --overwrite
 
 Exit codes:
 
-- `0`: every agent finished with status `success`
-- `1`: the benchmark ran, but at least one agent did not succeed
+- `0`: every run of every agent finished with status `success`
+- `1`: the benchmark ran, but at least one run did not succeed
 - `2`: the task file is invalid or the run directory already exists
 - `130`: interrupted with Ctrl+C
 
@@ -80,6 +80,8 @@ compile_command: ""
 test_command: pytest
 agent_timeout: 1800
 validation_timeout: 600
+repeat: 1
+# hidden_tests: ./hidden_tests
 agents:
   - codex
   - claude
@@ -97,8 +99,10 @@ Fields:
 - `agents`: Optional list of agents (no duplicates); defaults to `codex` and `claude`
 - `agent_timeout`: Optional integer (default `1800`); maximum seconds each agent process may run before it is killed and the result recorded as `error`
 - `validation_timeout`: Optional integer (default `600`); maximum seconds each of `compile_command` and `test_command` may run before it is killed and counted as failed
+- `repeat`: Optional integer (default `1`); number of times each agent runs the task, each time in a fresh workspace. Runs of one agent happen one after another; different agents run in parallel
+- `hidden_tests`: Optional directory outside `repo_path`. After an agent finishes and its patch is saved, the directory's contents are copied over the workspace and validation runs. Agents never see these files, and any same-path file an agent edited is restored first, so an agent cannot pass by weakening the tests
 
-`repo_path` may be relative to the location of `task.yaml`.
+`repo_path` and `hidden_tests` may be relative to the location of `task.yaml`.
 
 How `repo_path` becomes a workspace:
 
@@ -118,34 +122,50 @@ runs/
   <task-name>/
     benchmark_report.json
     codex/
-      PATCHARENA_TASK.md
-      fix.patch
-      ...
+      run-1/
+        PATCHARENA_TASK.md
+        fix.patch
+        ...
+      run-2/
+        ...
     claude/
-      PATCHARENA_TASK.md
-      fix.patch
-      ...
+      run-1/
+        ...
     opencode/
-      PATCHARENA_TASK.md
-      fix.patch
-      ...
+      run-1/
+        ...
     copilot/
-      PATCHARENA_TASK.md
-      fix.patch
-      ...
+      run-1/
+        ...
 ```
+
+Each run of each agent gets its own workspace directory.
 
 ## Report Shape
 
 The JSON report contains:
 
-- top-level task metadata, including `source_has_uncommitted_changes`
-- a `results` list with one entry per agent
-- a `summary` block with aggregate metrics
+- top-level task metadata, including `repeat`, `hidden_tests`, and
+  `source_has_uncommitted_changes`
+- an `agents` list with one summary per agent
+- a `results` list with one entry per run of each agent
 
-Each agent result includes:
+Each agent summary includes:
 
 - `agent`
+- `runs`
+- `successful_runs`
+- `pass_at_k`: for every k from 1 to `repeat`, the estimated probability that at
+  least one of k runs succeeds (the unbiased estimator from the Codex paper);
+  `pass_at_k["1"]` is the success rate
+- `status_counts`
+- `mean_runtime_seconds`
+- `mean_patch_lines`
+
+Each result includes:
+
+- `agent`
+- `run`
 - `runtime_seconds`
 - `patch_lines`
 - `files_changed`
@@ -186,11 +206,11 @@ report.
 ## How It Works
 
 1. Load `task.yaml`
-2. Clone or copy the source into one workspace per agent
+2. Clone or copy the source into one workspace per agent run
 3. Write `PATCHARENA_TASK.md` into each workspace; each agent injects its own files via `setup_workspace()`
-4. Run each agent in parallel
+4. Run agents in parallel; the `repeat` runs of one agent happen one after another
 5. Save `fix.patch` using `git diff`, before validation, so build and test artifacts stay out of it
-6. Run optional compile and test commands
+6. Copy `hidden_tests` over the workspace, then run optional compile and test commands
 7. Write `benchmark_report.json`
 
 Every agent and validation command runs in its own process group. When it
@@ -217,6 +237,7 @@ uv run mypy
   `--allowedTools Edit,Write,Bash` and Copilot with `--allow-all-tools`; Codex
   uses its own `--sandbox workspace-write`). Run PatchArena inside a container
   or VM for untrusted tasks.
-- Validation runs in the agent's own workspace, so an agent that edits the
-  tests can influence its own result
-- Each agent runs once per task, so results do not account for run-to-run variance
+- Without `hidden_tests`, validation uses the tests in the agent's own
+  workspace, so an agent that edits them can influence its own result
+- Agents run in parallel on one machine, so `runtime_seconds` includes
+  contention between agents
